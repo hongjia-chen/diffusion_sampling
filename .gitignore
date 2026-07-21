@@ -1,0 +1,5 @@
+outputs/
+logs/
+*.pid
+__pycache__/
+*.pyc
