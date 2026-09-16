@@ -3,7 +3,7 @@
 # Exhaustive-subset Dream factorization pipeline smoke test
 # =============================================================================
 # Run this script from anywhere after placing it inside the repository's
-# factorization/ directory. It validates the edited Python APIs, runs local
+# exp01_factorization/ directory. It validates the edited Python APIs, runs local
 # tests, performs a tiny real-GPU rollout, audits every JSON record, and then
 # exercises the plotting pipeline.
 #
@@ -19,7 +19,7 @@ set -euo pipefail
 # Repository location and user-overridable smoke settings
 # -----------------------------------------------------------------------------
 
-# The script is intended to live at factorization/<this-file>.sh, so its parent
+# The script is intended to live at exp01_factorization/<this-file>.sh, so its parent
 # directory is the repository root regardless of the caller's working folder.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -42,9 +42,9 @@ LOG_DIR="logs"
 LOG_FILE="$LOG_DIR/${SMOKE_RUN_ID}.log"
 
 # TEST_FILE may name one specific Python file, for example:
-#   TEST_FILE=factorization/test_probe.py
+#   TEST_FILE=exp01_factorization/test_probe.py
 # TEST_MODE may be "pytest", "python", or "auto". Without TEST_FILE, every
-# factorization/test_*.py file is run through pytest when present.
+# exp01_factorization/test_*.py file is run through pytest when present.
 TEST_FILE="${TEST_FILE:-}"
 TEST_MODE="${TEST_MODE:-auto}"
 TEST_ARGS="${TEST_ARGS:-}"
@@ -88,9 +88,9 @@ echo "[OK] conda environment: $CONDA_DEFAULT_ENV"
 echo "[OK] repository root:  $PROJECT_DIR"
 
 REQUIRED_FILES=(
-    "factorization/dream_adapter.py"
-    "factorization/probe.py"
-    "factorization/rollout.py"
+    "exp01_factorization/dream_adapter.py"
+    "exp01_factorization/probe.py"
+    "exp01_factorization/rollout.py"
     "scripts/run_factorization_rollout.py"
     "scripts/plot_factorization_results.py"
 )
@@ -119,8 +119,8 @@ from pathlib import Path
 import re
 
 paths = [
-    Path("factorization/probe.py"),
-    Path("factorization/rollout.py"),
+    Path("exp01_factorization/probe.py"),
+    Path("exp01_factorization/rollout.py"),
     Path("scripts/run_factorization_rollout.py"),
 ]
 pattern = re.compile(r"(?<![A-Za-z0-9_])k_values(?![A-Za-z0-9_])|--k-values")
@@ -145,8 +145,8 @@ python - <<'PY'
 from dataclasses import MISSING, fields
 from inspect import Parameter, signature
 
-from factorization.probe import _enumerate_subsets, probe_state
-from factorization.rollout import RolloutConfig
+from exp01_factorization.probe import _enumerate_subsets, probe_state
+from exp01_factorization.rollout import RolloutConfig
 
 # probe_state must require both experiment-defining keyword arguments.
 sig = signature(probe_state)
@@ -228,15 +228,15 @@ if [ -n "$TEST_FILE" ]; then
     run_selected_test_file "$TEST_FILE" "$TEST_MODE"
 else
     mapfile -t AUTO_TEST_FILES < <(
-        find factorization -maxdepth 1 -type f -name 'test_*.py' -print | sort
+        find exp01_factorization -maxdepth 1 -type f -name 'test_*.py' -print | sort
     )
     if [ "${#AUTO_TEST_FILES[@]}" -gt 0 ]; then
         echo "Running factorization pytest files:"
         printf '  %s\n' "${AUTO_TEST_FILES[@]}"
         python -m pytest -q "${AUTO_TEST_FILES[@]}"
     else
-        echo "[NOTE] no factorization/test_*.py files were auto-detected."
-        echo "       Set TEST_FILE=factorization/<your_test>.py to run a differently named file."
+        echo "[NOTE] no exp01_factorization/test_*.py files were auto-detected."
+        echo "       Set TEST_FILE=exp01_factorization/<your_test>.py to run a differently named file."
     fi
 fi
 

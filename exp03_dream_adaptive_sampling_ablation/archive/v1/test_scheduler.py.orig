@@ -1,0 +1,95 @@
+from __future__ import annotations
+
+import torch
+
+from dream_ablation.scheduler import GenerationConfig, generate, generation_step
+
+
+class FakeProvider:
+    mask_token_id = 9
+    eos_token_id = 8
+    excluded_token_ids = {9}
+    device = torch.device("cpu")
+
+    def forward_logits(self, input_ids: torch.Tensor) -> torch.Tensor:
+        batch, length = input_ids.shape
+        logits = torch.full((batch, length, 10), -6.0)
+        for row in range(batch):
+            for position in range(1, length):
+                token = position
+                logits[row, position, token] = 7.0 - 0.1 * position
+                logits[row, position, 0] = 0.0
+                # Once token 1 is committed, frozen y_2 becomes unlikely.
+                if input_ids[row, 1].item() == 1 and position == 2:
+                    logits[row, position, 2] = -7.0
+                    logits[row, position, 7] = 7.0
+        return logits
+
+
+class EosProvider(FakeProvider):
+    def forward_logits(self, input_ids: torch.Tensor) -> torch.Tensor:
+        logits = super().forward_logits(input_ids)
+        # Prefer EOS at continuation position two before positions zero/one.
+        logits[:, 3, :] = -6.0
+        logits[:, 3, self.eos_token_id] = 12.0
+        return logits
+
+
+def prompt() -> torch.Tensor:
+    return torch.tensor([[0]], dtype=torch.long)
+
+
+def test_adaptive_scores_complete_curve_and_stops_at_first_failure() -> None:
+    provider = FakeProvider()
+    config = GenerationConfig(
+        method="adaptive",
+        continuation_length=3,
+        delta=0.01,
+        max_candidates=3,
+        verifier_microbatch_size=2,
+    )
+    initial = torch.tensor([[0, 9, 9, 9]], dtype=torch.long)
+    step = generation_step(provider, initial, canvas_start=1, config=config, step_index=0)
+    assert len(step.trace["error_by_prefix_nats"]) == 3
+    assert step.trace["error_by_prefix_nats"][0] == 0.0
+    assert step.trace["error_by_prefix_nats"][1] > config.tau_nats
+    assert step.trace["accepted_prefix_length"] == 1
+    assert step.verifier_rows == 3
+    assert step.verifier_forward_passes == 2
+    assert initial.tolist() == [[0, 9, 9, 9]]
+
+
+def test_fixed_generation_fills_canvas() -> None:
+    result = generate(
+        FakeProvider(),
+        prompt(),
+        GenerationConfig(method="fixed", continuation_length=5, fixed_k=2),
+    )
+    assert result.continuation_token_ids == [1, 2, 3, 4, 5]
+    assert result.denoising_steps == 3
+    assert result.verifier_rows == 0
+    assert result.commitment_histogram[:2] == [1, 2]
+
+
+def test_eos_does_not_finish_while_earlier_positions_are_masked() -> None:
+    result = generate(
+        EosProvider(),
+        prompt(),
+        GenerationConfig(method="fixed", continuation_length=5, fixed_k=1),
+    )
+    assert result.eos_position == 2
+    # FakeProvider makes token 7 preferable at the second position after token
+    # 1 is committed. The invariant under test is that this position is still
+    # resolved before the already-committed EOS, not that it keeps its old
+    # marginal argmax (token 2).
+    assert result.continuation_token_ids == [1, 7]
+    assert result.denoising_steps == 5
+    assert not result.maximum_length_termination
+    assert result.traces[0]["eos_position_after"] == 2
+    assert result.traces[0]["remaining_masks_after"] == 4
+    assert result.traces[-1]["remaining_masks_after"] == 0
+
+
+def test_delta_is_converted_with_log1p() -> None:
+    config = GenerationConfig(method="adaptive", continuation_length=3, delta=0.10)
+    assert abs(config.tau_nats - 0.09531017980432487) < 1e-12

@@ -1,0 +1,399 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import platform
+import random
+import statistics
+import sys
+import time
+from pathlib import Path
+from typing import Any
+
+import torch
+
+from dream_ablation.io import percentile, sha256_file, stream_jsonl, write_json, write_jsonl
+from dream_ablation.model import DEFAULT_MODEL, DreamLogitsProvider, ModelOptions
+from dream_ablation.scheduler import GenerationConfig, generate
+from dream_ablation.scoring import score_record
+
+
+def parse_method(value: str, continuation_length: int, microbatch: int) -> GenerationConfig:
+    try:
+        kind, raw = value.split(":", 1)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("methods must look like fixed:4 or adaptive:0.10") from error
+    if kind == "fixed":
+        return GenerationConfig(
+            method="fixed", continuation_length=continuation_length,
+            fixed_k=int(raw), max_candidates=8,
+            verifier_microbatch_size=microbatch,
+        )
+    if kind == "adaptive":
+        return GenerationConfig(
+            method="adaptive", continuation_length=continuation_length,
+            delta=float(raw), max_candidates=8,
+            verifier_microbatch_size=microbatch,
+        )
+    raise argparse.ArgumentTypeError(f"unknown method kind: {kind}")
+
+
+def append_jsonl(path: Path, row: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def synchronize(device: torch.device) -> None:
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+
+
+def peak_memory(device: torch.device) -> int:
+    return int(torch.cuda.max_memory_allocated(device)) if device.type == "cuda" else 0
+
+
+def reset_peak_memory(device: torch.device) -> None:
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
+
+
+def validate_records(rows: list[dict[str, Any]]) -> str:
+    if not rows:
+        raise ValueError("Dataset is empty")
+    benchmark = str(rows[0].get("benchmark"))
+    seen: set[str] = set()
+    for row in rows:
+        if row.get("benchmark") != benchmark:
+            raise ValueError("A dataset file must contain exactly one benchmark")
+        example_id = str(row["example_id"])
+        if example_id in seen:
+            raise ValueError(f"Duplicate example_id: {example_id}")
+        if not isinstance(row.get("prompt"), str) or not row["prompt"]:
+            raise ValueError(f"Invalid prompt for {example_id}")
+        seen.add(example_id)
+    return benchmark
+
+
+def select_sample(rows: list[dict[str, Any]], size: int, seed: int) -> list[dict[str, Any]]:
+    """Select one reproducible subset while retaining the frozen dataset order."""
+    if size < 1:
+        raise ValueError("sample size must be positive")
+    if size >= len(rows):
+        return rows
+    indices = sorted(random.Random(seed).sample(range(len(rows)), size))
+    return [rows[index] for index in indices]
+
+
+def existing_ids(path: Path) -> set[str]:
+    if not path.exists():
+        return set()
+    return {str(row["example_id"]) for row in stream_jsonl(path)}
+
+
+def repair_partial_artifacts(records_path: Path, traces_path: Path) -> set[str]:
+    """Keep only task records with a complete, unique trace sequence."""
+    records = list(stream_jsonl(records_path)) if records_path.exists() else []
+    traces = list(stream_jsonl(traces_path)) if traces_path.exists() else []
+    trace_counts: dict[str, int] = {}
+    for trace in traces:
+        example_id = str(trace["example_id"])
+        trace_counts[example_id] = trace_counts.get(example_id, 0) + 1
+    seen: set[str] = set()
+    kept_records = []
+    for record in records:
+        example_id = str(record["example_id"])
+        # Records written with --trace-limit have no traces by design. Demanding
+        # a full trace sequence for them would discard every one on resume, so
+        # the run would restart from zero forever. Records predating the flag
+        # have no "traced" key and were always traced.
+        if record.get("traced", True):
+            complete = trace_counts.get(example_id, 0) == int(record["denoising_steps"])
+        else:
+            complete = example_id not in trace_counts
+        if complete and example_id not in seen:
+            kept_records.append(record)
+            seen.add(example_id)
+    kept_traces = [trace for trace in traces if str(trace["example_id"]) in seen]
+    if len(kept_records) != len(records) or len(kept_traces) != len(traces):
+        write_jsonl(records_path, kept_records)
+        write_jsonl(traces_path, kept_traces)
+    return seen
+
+
+def run_method(
+    provider: DreamLogitsProvider,
+    rows: list[dict[str, Any]],
+    config: GenerationConfig,
+    output_root: Path,
+    *,
+    timing_repeats: int,
+    trace_limit: int,
+    use_chat_template: bool,
+    overwrite: bool,
+) -> None:
+    method_dir = output_root / config.label
+    records_path = method_dir / "records.jsonl"
+    traces_path = method_dir / "decision_traces.jsonl"
+    metadata_path = method_dir / "metadata.json"
+    if overwrite:
+        for path in (
+            records_path,
+            traces_path,
+            metadata_path,
+            method_dir / "evalplus_samples.jsonl",
+            method_dir / "records.scored.jsonl",
+            method_dir / "evalplus_results.json",
+        ):
+            if path.exists():
+                path.unlink()
+    completed = repair_partial_artifacts(records_path, traces_path)
+    method_dir.mkdir(parents=True, exist_ok=True)
+    metadata = {
+        "status": "running",
+        "method": config.label,
+        "method_type": config.method,
+        "fixed_k": config.fixed_k,
+        "delta": config.delta,
+        "tau_nats": config.tau_nats,
+        "continuation_length": config.continuation_length,
+        "max_candidates": config.max_candidates,
+        "verifier_microbatch_size": config.verifier_microbatch_size,
+        "timing_repeats": timing_repeats,
+        "trace_limit": trace_limit,
+        "model": provider.tokenizer.name_or_path,
+        "model_revision": getattr(provider.model.config, "_commit_hash", None),
+        "dtype": str(next(provider.model.parameters()).dtype).replace("torch.", ""),
+        "proposer_is_verifier": True,
+        "prompt_template": "tokenizer_chat_template" if use_chat_template else "raw",
+    }
+    write_json(metadata_path, metadata)
+
+    # One untimed warmup keeps startup/JIT work out of the first task latency.
+    first_pending = next((row for row in rows if str(row["example_id"]) not in completed), None)
+    if first_pending is not None:
+        rendered = provider.render_prompt(first_pending["prompt"], use_chat_template=use_chat_template)
+        prompt_ids = provider.encode_prompt(rendered)
+        generate(provider, prompt_ids, config, capture_traces=False)
+        synchronize(provider.device)
+
+    for task_index, row in enumerate(rows):
+        example_id = str(row["example_id"])
+        if example_id in completed:
+            continue
+        rendered = provider.render_prompt(row["prompt"], use_chat_template=use_chat_template)
+        prompt_ids = provider.encode_prompt(rendered)
+        model_limit = getattr(provider.model.config, "max_position_embeddings", None)
+        requested = int(prompt_ids.shape[1]) + config.continuation_length
+        if model_limit is not None and requested > int(model_limit):
+            raise ValueError(
+                f"{example_id}: prompt+canvas length {requested} exceeds model limit {model_limit}"
+            )
+
+        latencies: list[float] = []
+        peaks: list[int] = []
+        canonical = None
+        for repeat in range(timing_repeats):
+            reset_peak_memory(provider.device)
+            synchronize(provider.device)
+            started = time.perf_counter()
+            result = generate(provider, prompt_ids, config, capture_traces=False)
+            synchronize(provider.device)
+            latencies.append(time.perf_counter() - started)
+            peaks.append(peak_memory(provider.device))
+            if canonical is None:
+                canonical = result
+            elif result.continuation_token_ids != canonical.continuation_token_ids:
+                raise RuntimeError(f"Determinism check failed for {config.label}/{example_id}")
+        assert canonical is not None
+        # Tracing costs a whole extra generation, so only the first
+        # `trace_limit` tasks pay it. Those tasks also carry the determinism
+        # check below, which is the only one left when timing_repeats == 1.
+        should_trace = task_index < trace_limit
+        traced = None
+        if should_trace:
+            traced = generate(provider, prompt_ids, config, capture_traces=True)
+            synchronize(provider.device)
+            if traced.continuation_token_ids != canonical.continuation_token_ids:
+                raise RuntimeError(
+                    f"Trace replay changed output for {config.label}/{example_id}"
+                )
+        completion = provider.decode(canonical.continuation_token_ids)
+        scoring = score_record(row, completion)
+        if canonical.eos_position is None:
+            premature_eos = False
+        elif row["benchmark"] == "gsm8k":
+            premature_eos = scoring.get("failure_type") in {
+                "missing_final_answer", "malformed_final_answer"
+            }
+        elif row["benchmark"] == "schema_json":
+            premature_eos = not bool(scoring.get("json_parse_valid"))
+        else:
+            premature_eos = not bool(scoring.get("syntax_valid"))
+        decision_count = max(canonical.denoising_steps, 1)
+        committed_count = sum(
+            (index + 1) * count
+            for index, count in enumerate(canonical.commitment_histogram)
+        )
+        output = {
+            "benchmark": row["benchmark"],
+            "example_id": example_id,
+            "method": config.label,
+            "raw_prompt": row["prompt"],
+            "rendered_prompt": rendered,
+            "raw_completion": completion,
+            **scoring,
+            "output_token_count": len(canonical.continuation_token_ids),
+            "eos_position": canonical.eos_position,
+            "denoising_steps": canonical.denoising_steps,
+            "dream_proposal_passes": canonical.proposer_passes,
+            "verifier_rows": canonical.verifier_rows,
+            "verifier_forward_passes": canonical.verifier_forward_passes,
+            "wall_time_seconds": statistics.median(latencies),
+            "timing_repeats_seconds": latencies,
+            "p95_repeat_seconds": percentile(latencies, 0.95),
+            "peak_gpu_memory_bytes": max(peaks),
+            "mean_committed_tokens_per_step": committed_count / decision_count,
+            "commitment_histogram_1_to_8": canonical.commitment_histogram,
+            "maximum_length_termination": canonical.maximum_length_termination,
+            "premature_eos": premature_eos,
+            "traced": should_trace,
+            "source": {key: value for key, value in row.items() if key not in {"prompt", "schema", "target"}},
+        }
+        append_jsonl(records_path, output)
+        if traced is not None:
+            for trace in traced.traces:
+                append_jsonl(
+                    traces_path,
+                    {"benchmark": row["benchmark"], "example_id": example_id,
+                     "method": config.label, **trace},
+                )
+        print(
+            f"[{config.label}] {task_index + 1}/{len(rows)} {example_id}: "
+            f"{statistics.median(latencies):.3f}s, steps={canonical.denoising_steps}",
+            flush=True,
+        )
+
+    if rows[0]["benchmark"] == "mbpp_plus":
+        all_records = list(stream_jsonl(records_path))
+        write_jsonl(
+            method_dir / "evalplus_samples.jsonl",
+            [
+                {"task_id": row["example_id"], "solution": row["parsed_output"]}
+                for row in all_records
+            ],
+        )
+    metadata["status"] = "complete"
+    metadata["completed_examples"] = len(existing_ids(records_path))
+    metadata["artifacts"] = {
+        "records": "records.jsonl",
+        "decision_traces": "decision_traces.jsonl",
+        "evalplus_samples": "evalplus_samples.jsonl" if rows[0]["benchmark"] == "mbpp_plus" else None,
+    }
+    write_json(metadata_path, metadata)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Run deterministic Dream ablation methods")
+    parser.add_argument("--dataset", type=Path, required=True)
+    parser.add_argument("--output-root", type=Path, required=True)
+    parser.add_argument("--methods", nargs="+", required=True)
+    parser.add_argument("--continuation-length", type=int, required=True)
+    parser.add_argument("--verifier-microbatch-size", type=int, default=8)
+    parser.add_argument("--timing-repeats", type=int, default=3)
+    parser.add_argument(
+        "--trace-limit",
+        type=int,
+        default=20,
+        help="capture decision traces for the first N tasks of each method. "
+        "Tracing costs one extra full generation per task, so this bounds "
+        "that cost. 0 disables it, which also disables the audit's "
+        "independent check of the acceptance rule and empties the "
+        "error-curve figure.",
+    )
+    parser.add_argument("--model", default=DEFAULT_MODEL)
+    parser.add_argument("--revision")
+    parser.add_argument("--device", default="cuda:0")
+    parser.add_argument("--dtype", choices=("bfloat16", "float16", "float32"), default="bfloat16")
+    parser.add_argument("--cache-dir")
+    parser.add_argument("--local-files-only", action="store_true")
+    parser.add_argument("--seed", type=int, default=12345)
+    parser.add_argument("--no-chat-template", action="store_true")
+    parser.add_argument("--limit", type=int)
+    parser.add_argument(
+        "--sample-size",
+        type=int,
+        help="deterministically sample this many tasks using --seed; unlike "
+        "--limit, this does not bias the run toward the start of the dataset",
+    )
+    parser.add_argument("--overwrite", action="store_true")
+    args = parser.parse_args()
+    if args.timing_repeats < 1:
+        parser.error("--timing-repeats must be positive")
+    rows = list(stream_jsonl(args.dataset))
+    benchmark = validate_records(rows)
+    if args.limit is not None and args.sample_size is not None:
+        parser.error("--limit and --sample-size are mutually exclusive")
+    if args.limit is not None:
+        if args.limit < 1:
+            parser.error("--limit must be positive")
+        rows = rows[: args.limit]
+    if args.sample_size is not None:
+        if args.sample_size < 1:
+            parser.error("--sample-size must be positive")
+        rows = select_sample(rows, args.sample_size, args.seed)
+    configs = [
+        parse_method(value, args.continuation_length, args.verifier_microbatch_size)
+        for value in args.methods
+    ]
+    if len({config.label for config in configs}) != len(configs):
+        parser.error("duplicate methods")
+    if args.device.startswith("cuda") and not torch.cuda.is_available():
+        parser.error("CUDA is unavailable")
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
+    provider = DreamLogitsProvider.from_pretrained(
+        ModelOptions(
+            model_id=args.model, revision=args.revision, device=args.device,
+            dtype=args.dtype, cache_dir=args.cache_dir,
+            local_files_only=args.local_files_only,
+        )
+    )
+    run_metadata = {
+        "dataset": str(args.dataset.resolve()),
+        "dataset_sha256": sha256_file(args.dataset),
+        "benchmark": benchmark,
+        "number_of_tasks": len(rows),
+        "example_ids": [str(row["example_id"]) for row in rows],
+        "model": args.model,
+        "revision": args.revision,
+        "dtype": args.dtype,
+        "device": args.device,
+        "physical_gpu": os.environ.get("EXPERIMENT_PHYSICAL_GPU_ID"),
+        "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
+        "python": sys.version.split()[0],
+        "torch": torch.__version__,
+        "host": platform.node(),
+        "seed": args.seed,
+        "methods": [config.label for config in configs],
+    }
+    args.output_root.mkdir(parents=True, exist_ok=True)
+    worker_label = os.environ.get("EXPERIMENT_PHYSICAL_GPU_ID", str(os.getpid()))
+    write_json(args.output_root / f"run_metadata_worker_{worker_label}.json", run_metadata)
+    for config in configs:
+        run_method(
+            provider, rows, config, args.output_root,
+            timing_repeats=args.timing_repeats,
+            trace_limit=args.trace_limit,
+            use_chat_template=not args.no_chat_template,
+            overwrite=args.overwrite,
+        )
+
+
+if __name__ == "__main__":
+    main()

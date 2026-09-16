@@ -6,7 +6,7 @@ At each denoising state ``c_t`` this module:
 2. permanently commits only the highest-confidence proposal ``x_1``; and
 3. verifies that exactly one masked canvas position changed.
 
-The temporary states created inside :func:`factorization.probe.probe_state`
+The temporary states created inside :func:`exp01_factorization.probe.probe_state`
 never become part of the canonical trajectory.
 """
 
@@ -19,12 +19,12 @@ from typing import Callable, Sequence
 
 import torch
 
-from factorization.dream_adapter import (
+from exp01_factorization.dream_adapter import (
     DreamAdapter,
     DreamState,
     TokenPrediction,
 )
-from factorization.probe import ProbeResult, probe_state
+from exp01_factorization.probe import ProbeResult, probe_state
 
 
 # -----------------------------------------------------------------------------

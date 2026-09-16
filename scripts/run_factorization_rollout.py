@@ -40,14 +40,14 @@ REPO_ROOT = SCRIPT_PATH.parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from factorization.dream_adapter import (  # noqa: E402
+from exp01_factorization.dream_adapter import (  # noqa: E402
     DreamAdapter,
     DreamState,
     ModelLoadOptions,
     TokenPrediction,
 )
-from factorization.probe import FactorizationEstimate, ProbeResult  # noqa: E402
-from factorization.rollout import (  # noqa: E402
+from exp01_factorization.probe import FactorizationEstimate, ProbeResult  # noqa: E402
+from exp01_factorization.rollout import (  # noqa: E402
     RolloutConfig,
     RolloutResult,
     RolloutStep,

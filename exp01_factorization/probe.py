@@ -28,7 +28,7 @@ from typing import Mapping, Sequence
 
 import torch
 
-from factorization.dream_adapter import (
+from exp01_factorization.dream_adapter import (
     DreamAdapter,
     DreamState,
     TokenPrediction,
