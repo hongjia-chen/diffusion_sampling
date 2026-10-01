@@ -20,7 +20,9 @@ set -euo pipefail
 
 PROJECT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "$PROJECT_DIR"
-export PYTHONPATH="$PROJECT_DIR${PYTHONPATH:+:$PYTHONPATH}"
+# The shared harness (package, runner and scoring scripts) lives one level up.
+HARNESS_DIR="$(cd -- "$PROJECT_DIR/../harness" && pwd)"
+export PYTHONPATH="$HARNESS_DIR:$PROJECT_DIR${PYTHONPATH:+:$PYTHONPATH}"
 export CUBLAS_WORKSPACE_CONFIG="${CUBLAS_WORKSPACE_CONFIG:-:4096:8}"
 
 PYTHON_BIN="${PYTHON_BIN:-${HOME}/miniconda3/envs/diffusion/bin/python}"
@@ -50,7 +52,7 @@ case "$ROLES" in
 esac
 OUTPUT_ROOT="${OUTPUT_ROOT:-$PROJECT_DIR/outputs/$DEFAULT_NAME}"
 LOG_ROOT="${LOG_ROOT:-$PROJECT_DIR/logs/$DEFAULT_NAME}"
-SDAR_OVERLAY="${SDAR_OVERLAY:-$PROJECT_DIR/../exp05_adaptive_re/vendor_env/tf452}"
+SDAR_OVERLAY="${SDAR_OVERLAY:-$HARNESS_DIR/vendor_env/tf452}"
 EVALPLUS_WORKERS="${EVALPLUS_WORKERS:-4}"
 BLOCK=64
 GROUP_ROWS=4
@@ -114,7 +116,7 @@ for bench in $BENCHMARKS; do
     echo "== $bench ($(date '+%H:%M:%S')) =="
     EXPERIMENT_PHYSICAL_GPU_ID="${PAIR//,/+}" CUDA_VISIBLE_DEVICES="$PAIR" \
     PYTHONPATH="$SDAR_OVERLAY:$PYTHONPATH" \
-    "$PYTHON_BIN" -u scripts/run_benchmark.py \
+    "$PYTHON_BIN" -u "$HARNESS_DIR/scripts/run_benchmark.py" \
         --dataset "$DATA_ROOT/$bench/test.jsonl" \
         --output-root "$OUTPUT_ROOT/$bench" \
         --continuation-length "$(canvas_for "$bench")" \
@@ -135,11 +137,11 @@ for bench in mbpp_plus humaneval_plus; do
     [ -d "$OUTPUT_ROOT/$bench" ] || continue
     for method_dir in "$OUTPUT_ROOT/$bench"/*/; do
         if [ -f "$method_dir/evalplus_samples.jsonl" ] && [ ! -f "$method_dir/records.scored.jsonl" ]; then
-            "$PYTHON_BIN" scripts/score_evalplus.py --benchmark "$bench" \
+            "$PYTHON_BIN" "$HARNESS_DIR/scripts/score_evalplus.py" --benchmark "$bench" \
                 --parallel "$EVALPLUS_WORKERS" "$method_dir"
         fi
     done
 done
-"$PYTHON_BIN" scripts/summarize_results.py --output-root "$OUTPUT_ROOT" \
+"$PYTHON_BIN" "$HARNESS_DIR/scripts/summarize_results.py" --output-root "$OUTPUT_ROOT" \
     --output-dir "$OUTPUT_ROOT/comparison"
 echo "Done ($(date '+%H:%M:%S')): $OUTPUT_ROOT/comparison/summary.csv"

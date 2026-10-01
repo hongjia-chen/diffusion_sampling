@@ -28,23 +28,20 @@ aren't comparable).
 
 ## Layout
 
+The sampler, runner, scoring scripts and tests now live in the shared
+[`../harness/`](../harness/README.md) (package `sdar_harness`, formerly this
+experiment's `adaptive_re/`; exp06's copy, a strict superset of this one, was
+kept). The code exactly as it produced exp05's results is in git commit
+`b98dad7`. DESIGN.md still names files by their old `adaptive_re/` paths.
+
 ```
-adaptive_re/          ported from exp04's autospec/ (package renamed)
-  scheduler.py        fixed-k and adaptive commitment, early stop, stop set
-  blockwise.py        block-diffusion loop (SDAR), Algorithm 3 branch removed
-  cross.py            SDAR proposes / Dream verifies, remasking (veto optional)
-  model.py            checkpoint-agnostic provider (dream / sdar families)
-  scoring.py          gsm8k / math_500 / mbpp_plus / humaneval_plus
-  io.py, timing.py
-scripts/              run_benchmark, score_evalplus, summarize_results,
-                      compare_exp04 (B1/B2 must reproduce exp04's text),
-                      preflight, pack_work, check_run.sh, queue_status.sh
+scripts/              compare_exp04 (B1/B2 must reproduce exp04's text),
+                      check_run.sh, queue_status.sh
 launch_sdar_baselines.sh   PHASE=b1 | b2, one process per GPU
 launch_cross.sh            xadaptive arms; LAYOUT=exclusive (2 workers) | shared (3)
-tests/                everything from exp04 except the Algorithm 3 and sigma tests
 reference/            exp04's Dream-7B frontier and SDAR cost tables;
                       exp04_sdar_costs.json balances B1/B2 across GPUs
-vendor_env -> ../exp04_autospeculation/vendor_env   (transformers 4.52.4 overlay)
+vendor_env -> ../harness/vendor_env   (transformers 4.52.4 overlay)
 ```
 
 Shared, at the repository root:
@@ -57,6 +54,8 @@ Shared, at the repository root:
 
 ## Checks
 
+The tests moved with the code:
+
 ```bash
-PYTHONPATH=vendor_env/tf452:. python -m pytest -q
+cd ../harness && PYTHONPATH=vendor_env/tf452:. python -m pytest -q
 ```

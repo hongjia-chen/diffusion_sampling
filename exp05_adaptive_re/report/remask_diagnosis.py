@@ -25,6 +25,7 @@ import sys
 from pathlib import Path
 
 PROJECT = Path(__file__).resolve().parent.parent
+HARNESS = PROJECT.parent / "harness"
 CROSS = PROJECT / "outputs" / "cross"
 DATA = PROJECT / "report" / "data" / "no_remask"
 BENCHMARKS = ["gsm8k", "humaneval_plus", "mbpp_plus"]
@@ -95,9 +96,9 @@ def plan() -> None:
         f'cd "{PROJECT}"',
         'PY="${PYTHON_BIN:-$HOME/miniconda3/envs/diffusion/bin/python}"',
         "export CUBLAS_WORKSPACE_CONFIG=:4096:8",
-        f'export PYTHONPATH="{PROJECT}/vendor_env/tf452:{PROJECT}"',
+        f'export PYTHONPATH="{HARNESS}/vendor_env/tf452:{HARNESS}:{PROJECT}"',
         "run_unit() {  # sdar_gpu dream_gpu bench delta subset",
-        '  CUDA_VISIBLE_DEVICES="$1,$2" EXPERIMENT_PHYSICAL_GPU_ID="$1+$2" "$PY" -u scripts/run_benchmark.py \\',
+        f'  CUDA_VISIBLE_DEVICES="$1,$2" EXPERIMENT_PHYSICAL_GPU_ID="$1+$2" "$PY" -u {HARNESS}/scripts/run_benchmark.py \\',
         '    --dataset "$5" --output-root "report/data/no_remask/out/$3" \\',
         '    --continuation-length "$6" --verifier-microbatch-size 4 --methods "xadaptive:$4" \\',
         '    --model ../models/SDAR-1.7B-Chat-b64-local --family sdar --block-length 64 \\',
@@ -210,7 +211,7 @@ def trace() -> None:
         groups.setdefault((ex["bench"], ex["delta"]), []).append(ex["id"])
     import subprocess
     env = dict(**__import__("os").environ, CUBLAS_WORKSPACE_CONFIG=":4096:8",
-               PYTHONPATH=f"{PROJECT}/vendor_env/tf452:{PROJECT}")
+               PYTHONPATH=f"{HARNESS}/vendor_env/tf452:{HARNESS}:{PROJECT}")
     python = str(Path.home() / "miniconda3/envs/diffusion/bin/python")
     jobs = []
     for (bench, delta), ids in sorted(groups.items()):
@@ -227,7 +228,7 @@ def trace() -> None:
     procs = []
     for index, (bench, delta, arm, kind, subset, n) in enumerate(jobs):
         sdar_gpu, dream_gpu = pairs[index % 2]
-        cmd = [python, "-u", "scripts/run_benchmark.py", "--dataset", str(subset),
+        cmd = [python, "-u", str(HARNESS / "scripts" / "run_benchmark.py"), "--dataset", str(subset),
                "--output-root", str(TRACED / arm / bench), "--continuation-length", str(CANVAS[bench]),
                "--verifier-microbatch-size", "4", "--methods", f"{kind}:{delta.replace('p', '.')}",
                "--model", "../models/SDAR-1.7B-Chat-b64-local", "--family", "sdar", "--block-length", "64",

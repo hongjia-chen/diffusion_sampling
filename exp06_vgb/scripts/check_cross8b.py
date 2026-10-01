@@ -8,7 +8,7 @@ up as nats; bf16 kernel noise shows up as ~1e-2. Also checks that each output
 reproduces the pilot record of the same task (cross-process determinism), and
 records per-card peak memory on the longest HumanEval+ prompt.
 
-    CUDA_VISIBLE_DEVICES=0,1 PYTHONPATH=../exp05_adaptive_re/vendor_env/tf452:. \\
+    CUDA_VISIBLE_DEVICES=0,1 PYTHONPATH=../harness/vendor_env/tf452:. \\
         python scripts/check_cross8b.py --roles 1p7b_proposes
 """
 from __future__ import annotations
@@ -22,11 +22,12 @@ from pathlib import Path
 import torch
 
 PROJECT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT / "scripts"))
+sys.path.insert(0, str(PROJECT.parent / "harness"))
+sys.path.insert(0, str(PROJECT.parent / "harness" / "scripts"))
 
-import adaptive_re.cross as cross  # noqa: E402
-from adaptive_re.model import MaskedDiffusionProvider, ModelOptions  # noqa: E402
-from adaptive_re.scheduler import _filtered_log_probs  # noqa: E402
+import sdar_harness.cross as cross  # noqa: E402
+from sdar_harness.model import MaskedDiffusionProvider, ModelOptions  # noqa: E402
+from sdar_harness.scheduler import _filtered_log_probs  # noqa: E402
 from run_benchmark import parse_method, select_sample, task_seed  # noqa: E402
 
 SMALL = PROJECT.parent / "models/SDAR-1.7B-Chat-b64-local"

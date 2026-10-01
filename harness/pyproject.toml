@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sdar-harness"
+version = "0.1.0"
+description = "Shared SDAR/Dream block-diffusion decoding harness: models, samplers, scoring, benchmark runner"
+requires-python = ">=3.10"
+
+[tool.setuptools.packages.find]
+include = ["sdar_harness*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

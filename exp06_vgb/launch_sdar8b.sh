@@ -11,7 +11,7 @@
 #
 # What differs is placement. 16.4 GB of BF16 weights do not fit one 16 GB
 # A4000, so each replica is pipeline-split over one PIX-connected pair
-# (adaptive_re.model.shard_decoder: 18 layers per card) and two replicas run
+# (sdar_harness.model.shard_decoder: 18 layers per card) and two replicas run
 # in parallel, one per pair. Timing synchronizes BOTH cards of a replica
 # before starting and after finishing each task, so tokens/s is wall-clock
 # for the whole model. Splitting computes the same function: SDAR-1.7B split
@@ -36,7 +36,9 @@ set -euo pipefail
 
 PROJECT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "$PROJECT_DIR"
-export PYTHONPATH="$PROJECT_DIR${PYTHONPATH:+:$PYTHONPATH}"
+# The shared harness (package, runner and scoring scripts) lives one level up.
+HARNESS_DIR="$(cd -- "$PROJECT_DIR/../harness" && pwd)"
+export PYTHONPATH="$HARNESS_DIR:$PROJECT_DIR${PYTHONPATH:+:$PYTHONPATH}"
 export CUBLAS_WORKSPACE_CONFIG="${CUBLAS_WORKSPACE_CONFIG:-:4096:8}"
 
 if [ -z "${PYTHON_BIN:-}" ]; then
@@ -59,7 +61,7 @@ LOG_ROOT="${LOG_ROOT:-$PROJECT_DIR/logs/sdar8b}"
 SDAR_REPO="JetLM/SDAR-8B-Chat-b64"
 SDAR_MODEL="${SDAR_MODEL:-$PROJECT_DIR/../models/SDAR-8B-Chat-b64-local}"
 # Same transformers 4.52.4 overlay exp05 ran under.
-SDAR_OVERLAY="${SDAR_OVERLAY:-$PROJECT_DIR/../exp05_adaptive_re/vendor_env/tf452}"
+SDAR_OVERLAY="${SDAR_OVERLAY:-$HARNESS_DIR/vendor_env/tf452}"
 # 1.7B seconds-per-task from exp04. Only the RATIOS matter here: they balance
 # the two replicas, and 8B scales every arm by roughly the same factor.
 COSTS="${COSTS:-$PROJECT_DIR/reference/exp06_vgb_pack_costs.json}"
@@ -96,7 +98,7 @@ echo "== preconditions =="
 if [ ! -d "$SDAR_MODEL" ]; then
     echo "building patched local checkpoint at $SDAR_MODEL"
     "$PYTHON_BIN" -c "from huggingface_hub import snapshot_download; snapshot_download('$SDAR_REPO')"
-    "$PYTHON_BIN" scripts/prepare_sdar_local.py "$SDAR_REPO" \
+    "$PYTHON_BIN" "$HARNESS_DIR/scripts/prepare_sdar_local.py" "$SDAR_REPO" \
         --output-root "$(dirname -- "$SDAR_MODEL")"
 fi
 if [ "$REFERENCE_MATH" = "1" ]; then
@@ -129,7 +131,7 @@ if [ -n "$busy" ]; then
 fi
 
 PLAN="$LOG_ROOT/plan.txt"
-"$PYTHON_BIN" scripts/pack_work.py --workers "${#PAIRS[@]}" --costs "$COSTS" \
+"$PYTHON_BIN" "$HARNESS_DIR/scripts/pack_work.py" --workers "${#PAIRS[@]}" --costs "$COSTS" \
     --tasks "$TASKS" --plan --benchmarks "${BENCH_LIST[@]}" --methods "${METHODS[@]}" >"$PLAN"
 echo "== plan (1.7B costs, for balancing only) =="
 cat "$PLAN"
@@ -177,7 +179,7 @@ run_worker() {
         # shellcheck disable=SC2086
         EXPERIMENT_PHYSICAL_GPU_ID="${pair//,/+}" CUDA_VISIBLE_DEVICES="$pair" \
         PYTHONPATH="$SDAR_OVERLAY:$PYTHONPATH" \
-        "$PYTHON_BIN" -u scripts/run_benchmark.py "${recipe[@]}" \
+        "$PYTHON_BIN" -u "$HARNESS_DIR/scripts/run_benchmark.py" "${recipe[@]}" \
             --output-root "$OUTPUT_ROOT/$bench" \
             --methods $methods \
             --model "$SDAR_MODEL" --devices "${devices[@]}"
@@ -192,7 +194,7 @@ run_reference_math() {
     mapfile -t recipe < <(recipe_args math_500)
     EXPERIMENT_PHYSICAL_GPU_ID="$gpu" CUDA_VISIBLE_DEVICES="$gpu" \
     PYTHONPATH="$SDAR_OVERLAY:$PYTHONPATH" \
-    "$PYTHON_BIN" -u scripts/run_benchmark.py "${recipe[@]}" \
+    "$PYTHON_BIN" -u "$HARNESS_DIR/scripts/run_benchmark.py" "${recipe[@]}" \
         --output-root "$REF_OUTPUT_ROOT/math_500" \
         --methods "$method" \
         --model "$REF_MODEL" --device cuda:0
@@ -226,7 +228,7 @@ if [ "$REFERENCE_MATH" = "1" ] && [[ " ${BENCH_LIST[*]} " == *" math_500 "* ]]; 
     for pid in "${pids[@]}"; do wait "$pid" || failed=1; done
     [ "$failed" = "0" ] || { echo "ERROR: a 1.7B MATH arm failed; see $LOG_ROOT" >&2; exit 1; }
     if [ "${DRY_RUN:-0}" != "1" ]; then
-        "$PYTHON_BIN" scripts/summarize_results.py --output-root "$REF_OUTPUT_ROOT" \
+        "$PYTHON_BIN" "$HARNESS_DIR/scripts/summarize_results.py" --output-root "$REF_OUTPUT_ROOT" \
             --output-dir "$REF_OUTPUT_ROOT/comparison"
         # The rerun replaces the port: same scores rules, comparable timings.
         REF_SUMMARY=("$REF_OUTPUT_ROOT/comparison/summary.json")
@@ -239,12 +241,12 @@ for bench in mbpp_plus humaneval_plus; do
     [ -d "$OUTPUT_ROOT/$bench" ] || continue
     for method_dir in "$OUTPUT_ROOT/$bench"/*/; do
         if [ -f "$method_dir/evalplus_samples.jsonl" ] && [ ! -f "$method_dir/records.scored.jsonl" ]; then
-            "$PYTHON_BIN" scripts/score_evalplus.py --benchmark "$bench" \
+            "$PYTHON_BIN" "$HARNESS_DIR/scripts/score_evalplus.py" --benchmark "$bench" \
                 --parallel "$EVALPLUS_WORKERS" "$method_dir"
         fi
     done
 done
-"$PYTHON_BIN" scripts/summarize_results.py --output-root "$OUTPUT_ROOT" \
+"$PYTHON_BIN" "$HARNESS_DIR/scripts/summarize_results.py" --output-root "$OUTPUT_ROOT" \
     --output-dir "$OUTPUT_ROOT/comparison"
 if [ "$TASKS" = "100" ]; then
     "$PYTHON_BIN" scripts/compare_scale.py "$OUTPUT_ROOT/comparison/summary.json" \

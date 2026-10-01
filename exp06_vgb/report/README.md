@@ -4,7 +4,7 @@
 §10–10b), built only from finished runs. Rebuild with:
 
 ```bash
-PYTHONPATH=../exp05_adaptive_re/vendor_env/tf452:. python report/make_report.py
+PYTHONPATH=../harness/vendor_env/tf452:. python report/make_report.py
 ```
 
 | file | what it does |

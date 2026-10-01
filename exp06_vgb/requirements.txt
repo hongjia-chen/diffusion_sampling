@@ -1,9 +1,0 @@
-# Install PyTorch separately using the cluster-supported CUDA build.
-# Pin `transformers` to whatever the chosen checkpoint records in its
-# config.json; the previous experiment's Dream-7B wanted 4.46.2. Left
-# unpinned here because the model is not chosen yet.
-transformers
-datasets>=3.0,<5
-evalplus==0.3.1
-matplotlib>=3.8
-pytest>=8.0

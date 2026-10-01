@@ -4,7 +4,7 @@
 #   PHASE=b1   SDAR fixed:{1,2,4,8}                         -- the proposer's frontier
 #   PHASE=b2   SDAR-verified adaptive:{0.10,...,10.00}  -- DROPPED 2026-09-19, kept runnable
 #
-# exp05 rules, all on by default in scripts/run_benchmark.py or set below:
+# exp05 rules, all on by default in ../harness/scripts/run_benchmark.py or set below:
 #   * early stop at the first stop token once everything before it is committed
 #   * stop set = SDAR's generation_config eos_token_id = {151645 <|im_end|>, 151643 <|endoftext|>}
 #   * logits read over the shared SDAR/Dream vocabulary, IDs < 151665
@@ -21,7 +21,9 @@ set -euo pipefail
 
 PROJECT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "$PROJECT_DIR"
-export PYTHONPATH="$PROJECT_DIR${PYTHONPATH:+:$PYTHONPATH}"
+# The shared harness (package, runner and scoring scripts) lives one level up.
+HARNESS_DIR="$(cd -- "$PROJECT_DIR/../harness" && pwd)"
+export PYTHONPATH="$HARNESS_DIR:$PROJECT_DIR${PYTHONPATH:+:$PYTHONPATH}"
 export CUBLAS_WORKSPACE_CONFIG="${CUBLAS_WORKSPACE_CONFIG:-:4096:8}"
 
 if [ -z "${PYTHON_BIN:-}" ]; then
@@ -41,7 +43,7 @@ DATA_ROOT="${DATA_ROOT:-$PROJECT_DIR/../data}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-$PROJECT_DIR/outputs/baseline/sdar}"
 LOG_ROOT="${LOG_ROOT:-$PROJECT_DIR/logs/baseline_$PHASE}"
 SDAR_MODEL="${SDAR_MODEL:-$PROJECT_DIR/../models/SDAR-1.7B-Chat-b64-local}"
-SDAR_OVERLAY="${SDAR_OVERLAY:-$PROJECT_DIR/vendor_env/tf452}"
+SDAR_OVERLAY="${SDAR_OVERLAY:-$HARNESS_DIR/vendor_env/tf452}"
 COSTS="${COSTS:-$PROJECT_DIR/reference/exp04_sdar_costs.json}"
 EVALPLUS_WORKERS="${EVALPLUS_WORKERS:-4}"
 BLOCK=64
@@ -86,7 +88,7 @@ for gpu in "${GPUS[@]}"; do
 done
 
 PLAN="$LOG_ROOT/plan.txt"
-"$PYTHON_BIN" scripts/pack_work.py --workers "${#GPUS[@]}" --costs "$COSTS" \
+"$PYTHON_BIN" "$HARNESS_DIR/scripts/pack_work.py" --workers "${#GPUS[@]}" --costs "$COSTS" \
     --tasks "$TASKS" --plan --benchmarks "${BENCH_LIST[@]}" --methods "${METHODS[@]}" >"$PLAN"
 echo "== plan (costs are exp04 upper bounds) =="
 cat "$PLAN"
@@ -114,7 +116,7 @@ run_worker() {
         # shellcheck disable=SC2086
         EXPERIMENT_PHYSICAL_GPU_ID="$gpu" CUDA_VISIBLE_DEVICES="$gpu" \
         PYTHONPATH="$SDAR_OVERLAY:$PYTHONPATH" \
-        "$PYTHON_BIN" -u scripts/run_benchmark.py \
+        "$PYTHON_BIN" -u "$HARNESS_DIR/scripts/run_benchmark.py" \
             --dataset "$DATA_ROOT/$bench/test.jsonl" \
             --output-root "$OUTPUT_ROOT/$bench" \
             --continuation-length "$(canvas_for "$bench")" \
@@ -145,12 +147,12 @@ for bench in mbpp_plus humaneval_plus; do
     [ -d "$OUTPUT_ROOT/$bench" ] || continue
     for method_dir in "$OUTPUT_ROOT/$bench"/*/; do
         if [ -f "$method_dir/evalplus_samples.jsonl" ] && [ ! -f "$method_dir/records.scored.jsonl" ]; then
-            "$PYTHON_BIN" scripts/score_evalplus.py --benchmark "$bench" \
+            "$PYTHON_BIN" "$HARNESS_DIR/scripts/score_evalplus.py" --benchmark "$bench" \
                 --parallel "$EVALPLUS_WORKERS" "$method_dir"
         fi
     done
 done
-"$PYTHON_BIN" scripts/summarize_results.py --output-root "$OUTPUT_ROOT" \
+"$PYTHON_BIN" "$HARNESS_DIR/scripts/summarize_results.py" --output-root "$OUTPUT_ROOT" \
     --output-dir "$OUTPUT_ROOT/comparison"
 "$PYTHON_BIN" scripts/compare_exp04.py "$OUTPUT_ROOT" \
     "$PROJECT_DIR/../exp04_autospeculation/outputs/baseline/sdar" | tee "$LOG_ROOT/compare_exp04.txt"

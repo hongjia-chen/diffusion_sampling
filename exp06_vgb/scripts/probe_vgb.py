@@ -9,7 +9,7 @@ prompts under several configs and record how it behaves -- steps to the first
 leaf, remasks, budget hits, and the per-step log(B~/F~) = log mean rho^lambda
 that sets the depth drift.
 
-    CUDA_VISIBLE_DEVICES=0,1,2 PYTHONPATH=.:../exp05_adaptive_re/vendor_env/tf452 \
+    CUDA_VISIBLE_DEVICES=0,1,2 PYTHONPATH=.:../harness:../harness/vendor_env/tf452 \
         python scripts/probe_vgb.py --timing --walk
 """
 
@@ -23,11 +23,11 @@ from pathlib import Path
 
 import torch
 
-from adaptive_re.blockwise import BlockCacheProvider
-from adaptive_re.io import stream_jsonl
-from adaptive_re.model import MaskedDiffusionProvider, ModelOptions, block_causal_mask
-from adaptive_re.scoring import score_record
-from adaptive_re.vgb import block_scorer, generate_vgb, parse_vgb_spec
+from sdar_harness.blockwise import BlockCacheProvider
+from sdar_harness.io import stream_jsonl
+from sdar_harness.model import MaskedDiffusionProvider, ModelOptions, block_causal_mask
+from sdar_harness.scoring import score_record
+from sdar_harness.vgb import block_scorer, generate_vgb, parse_vgb_spec
 
 HERE = Path(__file__).resolve().parent.parent
 

@@ -51,6 +51,8 @@ from pathlib import Path
 
 PROJECT = Path(__file__).resolve().parents[1]
 EXP05 = PROJECT.parent / "exp05_adaptive_re"
+HARNESS = PROJECT.parent / "harness"
+RUNNER = str(HARNESS / "scripts" / "run_benchmark.py")
 REPORT = PROJECT / "report"
 TRACED = REPORT / "data" / "traced"
 DATA = PROJECT.parent / "data"
@@ -129,7 +131,7 @@ def rerun_dir(arm: str, bench: str) -> Path:
 
 def plan(which: str = "base") -> None:
     python = Path.home() / "miniconda3/envs/diffusion/bin/python"
-    overlay = EXP05 / "vendor_env" / "tf452"
+    overlay = HARNESS / "vendor_env" / "tf452"
     common = ["--family", "sdar", "--block-length", "64", "--dtype", "bfloat16", "--seed", "271828",
               "--timing-repeats", "1", "--require-lean-logits", "--max-candidates", "64",
               "--verifier-microbatch-size", "4", "--local-files-only", "--vocab-limit", "151665",
@@ -147,7 +149,7 @@ def plan(which: str = "base") -> None:
         models = PROJECT.parent / "models"
         if which == "vgb":
             # launch_vgb.sh's arguments exactly, with the subset and tracing on
-            jobs.append((PROJECT, ["scripts/run_benchmark.py", *head,
+            jobs.append((PROJECT, [RUNNER, *head,
                                    "--output-root", str(TRACED / "vgb" / bench),
                                    "--family", "sdar", "--block-length", "64", "--dtype", "bfloat16",
                                    "--seed", "271828", "--timing-repeats", "1", "--require-lean-logits",
@@ -158,17 +160,17 @@ def plan(which: str = "base") -> None:
                                    "--vgb-budget", "512", "--vgb-row-chunk", "16",
                                    "--methods", *[ARMS[a][1] for a in VGB_ARMS]]))
             continue
-        jobs.append((PROJECT, ["scripts/run_benchmark.py", *head, *common,
+        jobs.append((PROJECT, [RUNNER, *head, *common,
                                "--output-root", str(TRACED / "sdar8b" / bench), "--methods", "fixed:1",
                                "--model", str(models / "SDAR-8B-Chat-b64-local"), "--devices", "cuda:0", "cuda:1",
                                "--fixed-temperature", "0.0", "--fixed-confidence", "logp"]))
-        jobs.append((EXP05, ["scripts/run_benchmark.py", *head, *common,
+        jobs.append((EXP05, [RUNNER, *head, *common,
                              "--output-root", str(TRACED / "sdar1p7b" / bench), "--methods", "fixed:1",
                              "--model", str(models / "SDAR-1.7B-Chat-b64-local"), "--device", "cuda:0",
                              "--fixed-temperature", "0.0", "--fixed-confidence", "logp"]))
         # launch_cross8b.sh, ROLES=1p7b_proposes
         methods = [ARMS[a][1] for a in ("remask_0p10", "remask_1p00", "plain_0p10", "plain_1p00")]
-        jobs.append((PROJECT, ["scripts/run_benchmark.py", *head, *common,
+        jobs.append((PROJECT, [RUNNER, *head, *common,
                                "--output-root", str(TRACED / "cross" / bench), "--methods", *methods,
                                "--model", str(models / "SDAR-1.7B-Chat-b64-local"), "--device", "cuda:1",
                                "--verifier-model", str(models / "SDAR-8B-Chat-b64-local"),

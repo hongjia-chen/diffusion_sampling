@@ -20,7 +20,7 @@ exp06 runs, all read from finished outputs:
    off), and VGB Track A's three arms (forward only, lambda=0.5, lambda=1),
    all from traced re-runs that must reproduce the recorded runs.
 
-    PYTHONPATH=../exp05_adaptive_re/vendor_env/tf452:. python report/make_report.py
+    PYTHONPATH=../harness/vendor_env/tf452:. python report/make_report.py
 """
 from __future__ import annotations
 

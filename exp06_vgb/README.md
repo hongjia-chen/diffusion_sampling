@@ -3,6 +3,15 @@
 This experiment compares `JetLM/SDAR-8B-Chat-b64` with exp05's completed
 `SDAR-1.7B-Chat-b64` fixed-k frontier on exactly the same sampled tasks.
 
+
+**Code location (2026-09-30).** The sampler package (`adaptive_re/`, now
+`sdar_harness`), the shared scripts (`run_benchmark`, `score_evalplus`,
+`summarize_results`, `pack_work`, `preflight`, `prepare_sdar_local`) and all
+tests moved to [`../harness/`](../harness/README.md), shared with exp05. Only
+experiment-specific scripts and reports remain here. The code exactly as it
+produced this experiment's results is in git commit `b98dad7`; DESIGN.md and
+IMPLEMENTATION_AUDIT.md still name files by their old paths.
+
 ## Scope
 
 - Benchmarks: GSM8K, HumanEval+, and MBPP+.
@@ -55,7 +64,7 @@ except for one addition: multi-GPU loading. The checkpoint is 16.4 GB in
 BF16, and each local RTX A4000 has 16,376 MiB, so it cannot load on one card.
 
 `--devices cuda:0 cuda:1` pipeline-splits the model (`shard_decoder` in
-`adaptive_re/model.py`): embeddings and layers 0-17 on the first card, layers
+`../harness/sdar_harness/model.py`): embeddings and layers 0-17 on the first card, layers
 18-35 plus the final norm and LM head on the second. Sampler state stays on the
 second card. Each layer's K/V cache stays on that layer's card. Pre-forward
 hooks move the mask, position IDs, and rotary tables to each card once per
@@ -63,7 +72,7 @@ forward. Hidden states cross between the cards once per forward.
 
 - **Same function.** SDAR-1.7B-b64 split over two cards reproduced the
   single-card run and the exp05 records exactly for 4 GSM8K and 4 HumanEval+
-  tasks at k=1 and k=4. The unit test is `tests/test_shard.py`.
+  tasks at k=1 and k=4. The unit test is `../harness/tests/test_shard.py`.
 - **Timing.** Every card in a replica is synchronized before and after each
   timed generation. Stage profiling uses the host-clock, sync-all-devices path.
   So `tokens_per_second` is wall-clock for the whole model.
@@ -97,7 +106,8 @@ The second part of exp06 implements VGB (arXiv:2606.28301, Def. 4.2, r = 1)
 with SDAR-1.7B as the reference model and SDAR-8B as the target, following
 [vgb_density_ratio_decoding.tex](vgb_density_ratio_decoding.tex). Feasibility
 analysis and the open design decisions are in [DESIGN.md](DESIGN.md). The
-sampler is `adaptive_re/vgb.py`, with tests in `tests/test_vgb.py`. The first
+sampler is `../harness/sdar_harness/vgb.py`, with tests in
+`../harness/tests/test_vgb.py`. The first
 GPU run to make is `scripts/probe_vgb.py --timing --walk`.
 
 ## exp05 re-run with SDAR-8B as the verifier (cross8b)

@@ -12,10 +12,10 @@ Views:
 """
 import json, re, sys, collections
 import torch
-sys.path.insert(0, '.'); sys.path.insert(0, 'report')
+sys.path.insert(0, '../harness'); sys.path.insert(0, '.'); sys.path.insert(0, 'report')
 from remask_diagnosis import paired, DELTAS
-from adaptive_re.model import MaskedDiffusionProvider, ModelOptions
-from adaptive_re.scheduler import _forward_slices, _filtered_log_probs
+from sdar_harness.model import MaskedDiffusionProvider, ModelOptions
+from sdar_harness.scheduler import _forward_slices, _filtered_log_probs
 
 OUT = sys.argv[1]
 BLOCK, CANVAS, STOP = 64, 256, 151645

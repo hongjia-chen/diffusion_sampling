@@ -28,7 +28,9 @@ set -euo pipefail
 
 PROJECT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "$PROJECT_DIR"
-export PYTHONPATH="$PROJECT_DIR${PYTHONPATH:+:$PYTHONPATH}"
+# The shared harness (package, runner and scoring scripts) lives one level up.
+HARNESS_DIR="$(cd -- "$PROJECT_DIR/../harness" && pwd)"
+export PYTHONPATH="$HARNESS_DIR:$PROJECT_DIR${PYTHONPATH:+:$PYTHONPATH}"
 export CUBLAS_WORKSPACE_CONFIG="${CUBLAS_WORKSPACE_CONFIG:-:4096:8}"
 
 if [ -z "${PYTHON_BIN:-}" ]; then
@@ -50,7 +52,7 @@ OUTPUT_ROOT="${OUTPUT_ROOT:-$PROJECT_DIR/outputs/cross}"
 LOG_ROOT="${LOG_ROOT:-$PROJECT_DIR/logs/cross}"
 SDAR_MODEL="${SDAR_MODEL:-$PROJECT_DIR/../models/SDAR-1.7B-Chat-b64-local}"
 DREAM_MODEL="${DREAM_MODEL:-Dream-org/Dream-v0-Instruct-7B}"
-SDAR_OVERLAY="${SDAR_OVERLAY:-$PROJECT_DIR/vendor_env/tf452}"
+SDAR_OVERLAY="${SDAR_OVERLAY:-$HARNESS_DIR/vendor_env/tf452}"
 TRACE_LIMIT="${TRACE_LIMIT:-5}"
 EVALPLUS_WORKERS="${EVALPLUS_WORKERS:-4}"
 BLOCK=64
@@ -129,7 +131,7 @@ run_worker() {
         EXPERIMENT_PHYSICAL_GPU_ID="${sdar_gpu}+${dream_gpu}" \
         CUDA_VISIBLE_DEVICES="$sdar_gpu,$dream_gpu" \
         PYTHONPATH="$SDAR_OVERLAY:$PYTHONPATH" \
-        "$PYTHON_BIN" -u scripts/run_benchmark.py \
+        "$PYTHON_BIN" -u "$HARNESS_DIR/scripts/run_benchmark.py" \
             --dataset "$DATA_ROOT/$bench/test.jsonl" \
             --output-root "$OUTPUT_ROOT/$bench" \
             --continuation-length "$(canvas_for "$bench")" \
@@ -161,11 +163,11 @@ for bench in mbpp_plus humaneval_plus; do
     [ -d "$OUTPUT_ROOT/$bench" ] || continue
     for method_dir in "$OUTPUT_ROOT/$bench"/*/; do
         if [ -f "$method_dir/evalplus_samples.jsonl" ] && [ ! -f "$method_dir/records.scored.jsonl" ]; then
-            "$PYTHON_BIN" scripts/score_evalplus.py --benchmark "$bench" \
+            "$PYTHON_BIN" "$HARNESS_DIR/scripts/score_evalplus.py" --benchmark "$bench" \
                 --parallel "$EVALPLUS_WORKERS" "$method_dir"
         fi
     done
 done
-"$PYTHON_BIN" scripts/summarize_results.py --output-root "$OUTPUT_ROOT" \
+"$PYTHON_BIN" "$HARNESS_DIR/scripts/summarize_results.py" --output-root "$OUTPUT_ROOT" \
     --output-dir "$OUTPUT_ROOT/comparison"
 echo "Done: $OUTPUT_ROOT/comparison/summary.json"
