@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 import warnings
 from dataclasses import dataclass, replace
 from typing import Any, Literal
@@ -85,6 +86,23 @@ FAMILIES: dict[str, Conventions] = {
     "sdar": SDAR,
     "generic": GENERIC_MASKED_DIFFUSION,
 }
+
+# JetLM/SDAR-<size>-Chat is the block-4 default; -b8 ... -b64 are the other
+# released block sizes. Local copies (prepare_sdar_local.py) append "-local".
+_SDAR_CHAT_NAME = re.compile(r"SDAR-.+-Chat(?:-b(\d+))?(?:-local)?")
+
+
+def trained_block_length(model_id: str) -> int | None:
+    """Block length an SDAR chat checkpoint was trained with, read from its name.
+
+    The released config.json files are identical across block sizes, so the
+    name is the only record of it. None when the name does not follow the
+    JetLM convention (Sci variants, derived checkpoints): then nothing is checked.
+    """
+    match = _SDAR_CHAT_NAME.fullmatch(model_id.rstrip("/").split("/")[-1])
+    if match is None:
+        return None
+    return int(match.group(1)) if match.group(1) else 4
 
 
 def declared_stop_token_ids(model: Any, tokenizer: Any) -> tuple[int, ...]:
@@ -297,6 +315,9 @@ class ModelOptions:
     # it (DESIGN.md F2). None takes the checkpoint's own declaration,
     # `generation_config.eos_token_id`, plus the tokenizer's EOS.
     stop_token_ids: tuple[int, ...] | None = None
+    # Decode an SDAR checkpoint at a block length other than the one it was
+    # trained with. Out of distribution; for robustness ablations only.
+    allow_block_mismatch: bool = False
 
     def __post_init__(self) -> None:
         if not self.model_id:
@@ -307,6 +328,14 @@ class ModelOptions:
             )
         if self.block_length is not None and self.block_length < 1:
             raise ValueError("block_length must be positive")
+        trained = trained_block_length(self.model_id) if self.family == "sdar" else None
+        decoded = self.conventions.block_length
+        if trained is not None and decoded != trained and not self.allow_block_mismatch:
+            raise ValueError(
+                f"{self.model_id} was trained with block length {trained} but would "
+                f"decode with {decoded}; pass --block-length {trained}, or "
+                "--allow-block-mismatch for an out-of-distribution ablation"
+            )
         if self.vocab_limit is not None and self.vocab_limit < 1:
             raise ValueError("vocab_limit must be positive")
         if self.devices is not None and len(set(self.devices)) != len(self.devices):

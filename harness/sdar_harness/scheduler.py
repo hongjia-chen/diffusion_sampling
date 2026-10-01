@@ -39,10 +39,13 @@ def _proposer_chunk(top_p: float | None) -> int:
 
 @dataclass(frozen=True)
 class GenerationConfig:
-    method: Literal["fixed", "adaptive"]
+    method: Literal["fixed", "adaptive", "dynamic"]
     continuation_length: int
     fixed_k: int | None = None
     delta: float | None = None
+    # "dynamic": SDAR's `low_confidence_dynamic` -- commit every candidate whose
+    # probability exceeds `threshold`, and at least one.
+    threshold: float | None = None
     max_candidates: int = 8
     verifier_microbatch_size: int = 8
     # Proposal sampling. temperature=0.0 is argmax, which is the historical
@@ -67,6 +70,8 @@ class GenerationConfig:
             raise ValueError("continuation_length must be positive")
         if self.max_candidates < 1 or self.verifier_microbatch_size < 1:
             raise ValueError("candidate and microbatch sizes must be positive")
+        if self.method != "dynamic" and self.threshold is not None:
+            raise ValueError("only dynamic methods set threshold")
         if self.method == "fixed":
             if self.fixed_k is None or self.fixed_k < 1:
                 raise ValueError("fixed methods require fixed_k >= 1")
@@ -79,6 +84,14 @@ class GenerationConfig:
                 raise ValueError("adaptive methods cannot set fixed_k")
             if self.delta is None or not math.isfinite(self.delta) or self.delta < 0:
                 raise ValueError("adaptive methods require finite delta >= 0")
+        elif self.method == "dynamic":
+            if self.fixed_k is not None or self.delta is not None:
+                raise ValueError("dynamic methods cannot set fixed_k or delta")
+            if self.threshold is None or not 0 < self.threshold < 1:
+                raise ValueError("dynamic methods require 0 < threshold < 1")
+            if self.confidence != "logp":
+                # The threshold is a probability; negative entropy is not one.
+                raise ValueError("dynamic methods rank by logp confidence")
         else:
             raise ValueError(f"unknown generation method: {self.method}")
         if self.confidence not in ("logp", "entropy"):
@@ -96,6 +109,8 @@ class GenerationConfig:
     def label(self) -> str:
         if self.method == "fixed":
             return f"fixed_k_{self.fixed_k}"
+        if self.method == "dynamic":
+            return f"dynamic_theta_{self.threshold:.2f}".replace(".", "p")
         value = f"{self.delta:.2f}".replace(".", "p")
         return f"adaptive_delta_{value}"
 
@@ -476,6 +491,12 @@ def generation_step(
     verifier_forward_passes = 0
     if config.method == "fixed":
         accepted = min(int(config.fixed_k), int(candidates.token_ids.numel()))
+    elif config.method == "dynamic":
+        # SDAR's low_confidence_dynamic with one token per step as the floor
+        # (denoising_steps = block_length). Candidates are sorted by
+        # probability, so the ones above the threshold are a prefix.
+        confident = int((candidates.confidences > config.threshold).sum().item())
+        accepted = max(1, confident)
     else:
         assert config.tau_nats is not None
         with timer("verifier"):
@@ -544,6 +565,7 @@ def generation_step(
             ),
             "threshold_delta": config.delta,
             "threshold_tau_nats": config.tau_nats,
+            "dynamic_threshold": config.threshold,
             "accepted_prefix_length": accepted,
             "committed_positions": [
                 int(value - canvas_start) for value in accepted_positions.detach().cpu()

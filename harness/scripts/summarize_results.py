@@ -89,6 +89,7 @@ def summarize_file(path: Path) -> dict[str, Any]:
         "fixed_k": metadata.get("fixed_k"),
         "delta": metadata.get("delta"),
         "tau_nats": metadata.get("tau_nats"),
+        "threshold": metadata.get("threshold"),
         "temperature": metadata.get("temperature"),
         "top_p": metadata.get("top_p"),
         "confidence_metric": metadata.get("confidence_metric"),

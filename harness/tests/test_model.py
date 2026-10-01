@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from sdar_harness.model import FAMILIES, MaskedDiffusionProvider, ModelOptions
+from sdar_harness.model import FAMILIES, MaskedDiffusionProvider, ModelOptions, trained_block_length
 
 
 class Tokenizer:
@@ -116,3 +116,33 @@ def test_lean_self_check_probe_is_untouched_for_a_full_canvas_model() -> None:
     )
     assert provider.verify_lean_path() is True
     assert model.probe_lengths == [12, 12]
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("JetLM/SDAR-1.7B-Chat", 4),
+        ("JetLM/SDAR-8B-Chat-b64", 64),
+        ("../models/SDAR-1.7B-Chat-b64-local", 64),
+        ("../models/SDAR-1.7B-Chat-local/", 4),
+        ("JetLM/SDAR-30B-A3B-Chat-b16", 16),
+        ("JetLM/SDAR-30B-A3B-Sci", None),
+        ("Dream-org/Dream-v0-Instruct-7B", None),
+    ],
+)
+def test_trained_block_length_is_read_from_the_checkpoint_name(name, expected) -> None:
+    assert trained_block_length(name) == expected
+
+
+def test_an_sdar_checkpoint_must_decode_at_its_trained_block_length() -> None:
+    # The family default is 64, so a b4 checkpoint without --block-length 4
+    # would silently decode out of distribution.
+    with pytest.raises(ValueError, match="trained with block length 4"):
+        ModelOptions(model_id="../models/SDAR-1.7B-Chat-local", family="sdar")
+    with pytest.raises(ValueError, match="trained with block length 64"):
+        ModelOptions(model_id="JetLM/SDAR-8B-Chat-b64", family="sdar", block_length=4)
+    assert ModelOptions(model_id="../models/SDAR-1.7B-Chat-local", family="sdar",
+                        block_length=4).conventions.block_length == 4
+    assert ModelOptions(model_id="JetLM/SDAR-8B-Chat-b64", family="sdar").conventions.block_length == 64
+    assert ModelOptions(model_id="../models/SDAR-1.7B-Chat-local", family="sdar",
+                        allow_block_mismatch=True).conventions.block_length == 64

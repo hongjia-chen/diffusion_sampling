@@ -205,3 +205,74 @@ def test_truncate_at_the_first_of_several_stop_tokens() -> None:
     assert scored == [10, 11] and index == 2 and token == 151645
     scored, index, token = truncate_at_stop([10, 11], frozenset({151645}))
     assert scored == [10, 11] and index is None and token is None
+
+
+class CalibratedProvider(FakeProvider):
+    """Position p proposes token p with probability PROBS[p], else token 0."""
+
+    PROBS = {1: 0.95, 2: 0.92, 3: 0.70, 4: 0.60}
+
+    def forward_logits(self, input_ids: torch.Tensor) -> torch.Tensor:
+        batch, length = input_ids.shape
+        logits = torch.full((batch, length, 10), -30.0)
+        logits[:, :, 0] = 0.0
+        for position, probability in self.PROBS.items():
+            if position < length:
+                logits[:, position, position] = float(torch.logit(torch.tensor(probability)))
+        return logits
+
+
+def _dynamic_step(threshold: float):
+    config = GenerationConfig(
+        method="dynamic", continuation_length=4, threshold=threshold, max_candidates=4
+    )
+    initial = torch.tensor([[0, 9, 9, 9, 9]], dtype=torch.long)
+    return generation_step(CalibratedProvider(), initial, canvas_start=1, config=config, step_index=0)
+
+
+def test_dynamic_commits_every_candidate_above_the_threshold() -> None:
+    step = _dynamic_step(0.90)
+    assert step.accepted_prefix_length == 2
+    assert step.trace["committed_positions"] == [0, 1]
+    assert step.state.tolist() == [[0, 1, 2, 9, 9]]
+    assert step.verifier_rows == 0 and step.verifier_forward_passes == 0
+    assert step.trace["dynamic_threshold"] == 0.90
+
+
+def test_dynamic_falls_back_to_one_token_when_nothing_is_confident() -> None:
+    # SDAR's floor: num_transfer_tokens = block_length / denoising_steps = 1.
+    step = _dynamic_step(0.99)
+    assert step.accepted_prefix_length == 1
+    assert step.state.tolist() == [[0, 1, 9, 9, 9]]
+
+
+def test_dynamic_generation_finishes_the_canvas() -> None:
+    config = GenerationConfig(
+        method="dynamic", continuation_length=4, threshold=0.90, max_candidates=4,
+        early_stop=False,
+    )
+    result = generate(CalibratedProvider(), prompt(), config)
+    assert result.continuation_token_ids == [1, 2, 3, 4]
+    assert sum(result.commitment_histogram) == result.denoising_steps == 3
+    assert result.commitment_histogram[:2] == [2, 1]
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        dict(method="dynamic", threshold=1.0),
+        dict(method="dynamic", threshold=0.0),
+        dict(method="dynamic"),
+        dict(method="dynamic", threshold=0.9, confidence="entropy"),
+        dict(method="dynamic", threshold=0.9, delta=0.1),
+        dict(method="fixed", fixed_k=1, threshold=0.9),
+    ],
+)
+def test_dynamic_config_is_validated(kwargs) -> None:
+    with pytest.raises(ValueError):
+        GenerationConfig(continuation_length=4, **kwargs)
+
+
+def test_dynamic_label() -> None:
+    config = GenerationConfig(method="dynamic", continuation_length=4, threshold=0.9)
+    assert config.label == "dynamic_theta_0p90"

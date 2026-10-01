@@ -23,7 +23,9 @@ from sdar_harness.io import percentile, sha256_file, stream_jsonl, write_json, w
 from sdar_harness.blockwise import generate_blockwise
 from sdar_harness.cross import CrossConfig, generate_cross
 from sdar_harness.vgb import VGBConfig, generate_vgb, parse_vgb_spec
-from sdar_harness.model import FAMILIES, MaskedDiffusionProvider, ModelOptions, assert_shared_vocabulary
+from sdar_harness.model import (
+    FAMILIES, MaskedDiffusionProvider, ModelOptions, assert_shared_vocabulary, trained_block_length,
+)
 from sdar_harness.timing import StageTimer
 from sdar_harness.scheduler import GenerationConfig, generate
 from sdar_harness.scoring import CODE_BENCHMARKS, score_record
@@ -50,8 +52,8 @@ def parse_method(
         kind, raw = value.split(":", 1)
     except ValueError as error:
         raise argparse.ArgumentTypeError(
-            "methods must look like fixed:4, adaptive:0.10, xadaptive:0.10 "
-            "or xadaptive-remask:0.10"
+            "methods must look like fixed:4, dynamic:0.90, adaptive:0.10, "
+            "xadaptive:0.10 or xadaptive-remask:0.10"
         ) from error
     if kind == "vgb":
         # Density-ratio VGB, SDAR-8B target / SDAR-1.7B reference (DESIGN.md).
@@ -80,6 +82,9 @@ def parse_method(
     )
     if kind == "fixed":
         return GenerationConfig(method="fixed", fixed_k=int(raw), **shared)
+    if kind == "dynamic":
+        # SDAR's low_confidence_dynamic: raw is the probability threshold.
+        return GenerationConfig(method="dynamic", threshold=float(raw), **shared)
     return GenerationConfig(method="adaptive", delta=float(raw), **shared)
 
 def task_seed(base_seed: int, label: str, example_id: str) -> int:
@@ -295,6 +300,7 @@ def run_method(
         "fixed_k": getattr(config, "fixed_k", None),
         "delta": getattr(config, "delta", None),
         "tau_nats": getattr(config, "tau_nats", None),
+        "threshold": getattr(config, "threshold", None),
         "continuation_length": config.continuation_length,
         "eos_policy": (
             "early_stop_at_first_stop_token"
@@ -588,6 +594,10 @@ def main() -> None:
                              "match the checkpoint (SDAR ships -b8 ... -b64); a "
                              "mismatch gives an attention pattern the weights "
                              "were never trained with.")
+    parser.add_argument("--allow-block-mismatch", action="store_true",
+                        help="decode an SDAR checkpoint at a block length other "
+                        "than the one its name says it was trained with "
+                        "(out-of-distribution ablations only)")
     parser.add_argument("--family", default="dream", choices=sorted(FAMILIES),
                         help="calling conventions for the checkpoint (logits "
                              "alignment and attention mask). Getting this wrong "
@@ -619,7 +629,7 @@ def main() -> None:
     )
     parser.add_argument("--max-candidates", type=int, default=8,
                         help="cap on tokens proposed (and so committed) per step")
-    for kind, default_conf in (("fixed", "logp"), ("adaptive", "logp")):
+    for kind, default_conf in (("fixed", "logp"), ("adaptive", "logp"), ("dynamic", "logp")):
         parser.add_argument(f"--{kind}-temperature", type=float, default=0.0)
         parser.add_argument(f"--{kind}-top-p", type=float, default=None)
         parser.add_argument(f"--{kind}-confidence", choices=("logp", "entropy"),
@@ -678,7 +688,7 @@ def main() -> None:
             "top_p": getattr(args, f"{kind}_top_p"),
             "confidence": getattr(args, f"{kind}_confidence"),
         }
-        for kind in ("fixed", "adaptive")
+        for kind in ("fixed", "adaptive", "dynamic")
     }
     configs = [
         parse_method(
@@ -719,6 +729,7 @@ def main() -> None:
             require_lean_logits=args.require_lean_logits,
             vocab_limit=args.vocab_limit,
             stop_token_ids=tuple(args.stop_token_ids) if args.stop_token_ids else None,
+            allow_block_mismatch=args.allow_block_mismatch,
         )
     )
     verifier = None
@@ -733,6 +744,7 @@ def main() -> None:
                               if FAMILIES[args.verifier_family].block_length is not None else None),
                 cache_dir=args.cache_dir, local_files_only=args.local_files_only,
                 require_lean_logits=True, vocab_limit=args.vocab_limit,
+                allow_block_mismatch=args.allow_block_mismatch,
             )
         )
         assert_shared_vocabulary(provider.tokenizer, verifier.tokenizer, args.vocab_limit)
@@ -744,7 +756,8 @@ def main() -> None:
         "example_ids": [str(row["example_id"]) for row in rows],
         "model": args.model,
         "family": args.family,
-        "block_length": args.block_length,
+        "block_length": provider.conventions.block_length,
+        "trained_block_length": trained_block_length(args.model),
         "revision": args.revision,
         "dtype": args.dtype,
         "device": args.device,
