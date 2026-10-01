@@ -129,6 +129,19 @@ def summarize_file(path: Path) -> dict[str, Any]:
             sum(float(row["output_token_count"]) for row in rows) / sum(latencies)
             if sum(latencies) > 0 else float("nan")
         ),
+        # Prompt prefill excluded: SimSD's "decoded tokens per second". Only
+        # when every task recorded its prefill (runs before 2026-10-01 did not).
+        "mean_prefill_seconds": (
+            mean([float(row["prefill_seconds"]) for row in rows])
+            if all(row.get("prefill_seconds") is not None for row in rows) else None
+        ),
+        "decode_tokens_per_second": (
+            sum(float(row["output_token_count"]) for row in rows)
+            / (sum(latencies) - sum(float(row["prefill_seconds"]) for row in rows))
+            if all(row.get("prefill_seconds") is not None for row in rows)
+            and sum(latencies) > sum(float(row["prefill_seconds"]) for row in rows)
+            else None
+        ),
         "decoded_positions_per_second": (
             sum(float(row.get("decoded_positions") or 0) for row in rows) / sum(latencies)
             if sum(latencies) > 0 else float("nan")

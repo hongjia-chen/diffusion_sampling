@@ -57,7 +57,7 @@ from sdar_harness.scheduler import (
     stop_token_ids,
     truncate_at_stop,
 )
-from sdar_harness.timing import NULL_TIMER, StageTimer
+from sdar_harness.timing import NULL_TIMER, SpanClock, StageTimer
 
 
 # The one group size for every Dream forward (DESIGN.md F1): per-row time is
@@ -329,8 +329,15 @@ def generate_cross(
                 )
         commit_passes += 1
 
+    # Both models' prompt commits are the prefill; Dream has none (it
+    # re-encodes the whole canvas every forward).
+    prefill_clock = SpanClock(
+        list(getattr(sdar, "devices", [sdar.device])) + list(getattr(dream, "devices", [dream.device]))
+    )
+    prefill_clock.start()
     if prefill_length:
         commit(0, prefill_length)
+    prefill_clock.stop()
 
     traces: list[dict[str, Any]] = []
     histogram = [0] * config.max_candidates
@@ -517,4 +524,5 @@ def generate_cross(
         early_stopped=early_stopped,
         decoded_positions=sum(1 for v in continuation if v != sdar.mask_token_id),
         extras={**counters, "remask_edits": remask_edits},
+        prefill_seconds=prefill_clock.seconds(),
     )

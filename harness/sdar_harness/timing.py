@@ -119,3 +119,48 @@ class StageTimer:
 
 
 NULL_TIMER = StageTimer(None, enabled=False)
+
+
+class SpanClock:
+    """Wall time of one span of GPU work (the prompt prefill), always on.
+
+    Unlike `StageTimer` this runs inside the timed repeats, so it must not
+    synchronize: it records a CUDA event pair on every card the span touches
+    and reads them only in `seconds()`, after the generation has finished.
+    The span is the slowest card's, start to end; the events are recorded at
+    the same host instant on streams that are idle or busy with the same
+    request, so their starts line up. Host clock on CPU.
+    """
+
+    def __init__(self, devices: list[torch.device]):
+        self.devices = list(dict.fromkeys(d for d in devices if d.type == "cuda"))
+        self._pairs: list[tuple[Any, Any]] = []
+        self._host: list[float] = []
+
+    def start(self) -> None:
+        if self.devices:
+            self._pairs = [
+                (torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True))
+                for _ in self.devices
+            ]
+            for device, (begin, _) in zip(self.devices, self._pairs):
+                begin.record(torch.cuda.current_stream(device))
+        else:
+            self._host = [time.perf_counter()]
+
+    def stop(self) -> None:
+        if self.devices:
+            for device, (_, end) in zip(self.devices, self._pairs):
+                end.record(torch.cuda.current_stream(device))
+        else:
+            self._host.append(time.perf_counter())
+
+    def seconds(self) -> float | None:
+        """Elapsed seconds; waits for the end events, so call it after generation."""
+        if self._pairs:
+            for _, end in self._pairs:
+                end.synchronize()
+            return max(begin.elapsed_time(end) for begin, end in self._pairs) / 1000.0
+        if len(self._host) == 2:
+            return self._host[1] - self._host[0]
+        return None

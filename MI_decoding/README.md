@@ -57,17 +57,51 @@ Outputs go to `outputs/baselines/<checkpoint>/` and `outputs/mi/<roles>/`,
 each with `comparison/summary.csv`. All launchers check GPUs for other users'
 processes and refuse to share a card.
 
-**Recipe** (both launchers, the exp05/06 recipe): greedy T=0, logp confidence,
-max_candidates = block, 100 tasks per benchmark sampled with seed 271828,
-canvases GSM8K 256 / HumanEval+ 512 / MBPP+ 256 (MATH-500 1024, opt-in through
-`BENCHMARKS`), early stop at the first settled stop token, logits over IDs
-< 151665, bf16. This is the in-house protocol. It is not SDAR's OpenCompass
-protocol, so paired comparisons are valid and absolute scores are not
-comparable to the paper (AUDIT §2).
+**Recipe** (both launchers): greedy T=0, logp confidence, max_candidates =
+block, early stop at the first settled stop token, logits over IDs < 151665,
+bf16. Benchmarks are GSM8K (the full 1,319-problem set, `../data/gsm8k_full`),
+MATH-500, MBPP+ (378) and HumanEval+ (164), on full sets by default. `TASKS=N`
+instead samples N per benchmark with seed 271828, for screening.
+
+Canvases are GSM8K 512, MATH-500 2048, MBPP+ 512 and HumanEval+ 768. exp05/06
+used 256/1024/256/512, and 13–16% of MATH answers hit the limit. Blocks are
+causal, so answers that ended earlier are unchanged and the exp06 references
+still pair task for task.
+
+This is the in-house protocol, not SDAR's OpenCompass one. Paired comparisons
+are valid; absolute scores are not comparable to the paper (AUDIT §2).
+
+Grids:
+- static `fixed:k` uses k ≤ block;
+- dynamic θ ∈ {0.99, 0.95, 0.9, 0.8, 0.7, 0.5, 0.3}, where SDAR itself uses 0.9 and 0.95;
+- MI δ ∈ {0.03, 0.1, 0.3, 1, 3, 10}.
+
+Together they cover about 1.3 to 7 tokens per step, so the curves overlap.
+
+**Timing.**
+- Batch 1, 3 untimed warmups per method, then one timed run per task. CUDA is
+  synchronized on every card around each task.
+- `wall_time_seconds` is end to end, prefill included.
+- `prefill_seconds` is the part spent committing the prompt's whole blocks,
+  measured with CUDA events inside the timed run. A prompt shorter than one
+  block has none, because it is decoded with the first block.
+- The summary reports `tokens_per_second` (output tokens / wall time,
+  corpus-level) and `decode_tokens_per_second` (prefill excluded; SimSD's
+  metric), plus forwards per task.
+- Run metadata records the GPU model.
+- Compare speedups only between runs on the same card set, and see
+  [PEER_GROUP.md](PEER_GROUP.md) for how eager-mode tok/s relates to published
+  numbers.
 
 **Checkpoints available:** `../models/SDAR-1.7B-Chat-local` (b4),
 `SDAR-1.7B-Chat-b64-local`, `SDAR-8B-Chat-b64-local`. The 8B b4 checkpoint
 (`JetLM/SDAR-8B-Chat`, 16 GB) has not been downloaded.
+
+## Peer group
+
+[PEER_GROUP.md](PEER_GROUP.md) tracks the published methods to compare with or
+cite: SimSD (the same SDAR-8B/1.7B pair, with roles swapped), S2D2, PUNT,
+APD, Spiffy and others. It also holds the tokens/s sanity check against them.
 
 ## Ported from exp06 (`reference/exp06/`, gitignored)
 

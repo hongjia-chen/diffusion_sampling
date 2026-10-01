@@ -4,14 +4,15 @@
 # confidence, up to `block` candidates); the other scores them with the
 # verifier-only ratio log p_V(y_j | c, y_<j) - log p_V(y_j | c), and the
 # longest prefix whose |cumulative ratio| stays within log(1 + δ) is
-# committed, at least one token, no veto. groups of 4 verifier rows. Same 100
-# task IDs, canvases and stop rules as the baselines (launch_baselines.sh).
+# committed, at least one token, no veto. Groups of 4 verifier rows. Same
+# tasks, canvases, stop rules, warmups and timing as launch_baselines.sh.
 #
 # ROLES=8b_proposes (default): SDAR-8B proposes and SDAR-1.7B verifies -- every
 # committed token is an 8B greedy proposal; the 1.7B only decides how many
 # commit per step (exp06 DESIGN §10a/§10b). ROLES=1p7b_proposes swaps them.
 #
 #   bash launch_mi.sh                         # refuses if another user's job is on the cards
+#   TASKS=200 bash launch_mi.sh                # screening subset (default: full sets)
 #   TASKS=5 OUTPUT_ROOT=outputs/mi_pilot LOG_ROOT=logs/mi_pilot bash launch_mi.sh
 #   DELTAS="0.10 1.00" bash launch_mi.sh
 #   VARIANTS="xadaptive xadaptive-remask" bash launch_mi.sh   # exp06's remask arm too
@@ -33,10 +34,11 @@ export CUBLAS_WORKSPACE_CONFIG="${CUBLAS_WORKSPACE_CONFIG:-:4096:8}"
 
 PYTHON_BIN="${PYTHON_BIN:-${HOME}/miniconda3/envs/diffusion/bin/python}"
 PAIR="${PAIR:-0,1}"
-TASKS="${TASKS:-100}"
+TASKS="${TASKS:-all}"
 SEED="${SEED:-271828}"
-BENCHMARKS="${BENCHMARKS:-gsm8k mbpp_plus humaneval_plus}"
-DELTAS="${DELTAS:-0.10 0.30 1.00 3.00}"
+BENCHMARKS="${BENCHMARKS:-gsm8k math_500 mbpp_plus humaneval_plus}"
+# Spans ~1.5 to ~7 tokens/step (exp05/06), the range of the dynamic θ grid.
+DELTAS="${DELTAS:-0.03 0.10 0.30 1.00 3.00 10.00}"
 # Remask arms first: they are the experiment; the counterfactual follows.
 VARIANTS="${VARIANTS:-xadaptive}"
 TRACE_LIMIT="${TRACE_LIMIT:-5}"
@@ -65,14 +67,26 @@ BLOCK="${BLOCK:-64}"
 GROUP_ROWS=4
 VOCAB_LIMIT=151665
 
+# Same as launch_baselines.sh: longer than exp05/06, see there.
 canvas_for() {
     case "$1" in
-        gsm8k) echo 256 ;;
-        humaneval_plus) echo 512 ;;
-        mbpp_plus) echo 256 ;;
+        gsm8k) echo 512 ;;
+        humaneval_plus) echo 768 ;;
+        mbpp_plus) echo 512 ;;
+        math_500) echo 2048 ;;
         *) echo "ERROR: no canvas for $1" >&2; exit 2 ;;
     esac
 }
+
+data_for() {
+    case "$1" in
+        gsm8k) echo "$DATA_ROOT/gsm8k_full/test.jsonl" ;;
+        *) echo "$DATA_ROOT/$1/test.jsonl" ;;
+    esac
+}
+
+SAMPLE_ARGS=()
+[ "$TASKS" = "all" ] || SAMPLE_ARGS=(--sample-size "$TASKS")
 
 METHODS=()
 for variant in $VARIANTS; do
@@ -85,7 +99,7 @@ for path in "$PROPOSER_MODEL" "$VERIFIER_MODEL" "$SDAR_OVERLAY"; do
     [ -d "$path" ] || { echo "ERROR: missing $path" >&2; exit 2; }
 done
 for bench in $BENCHMARKS; do
-    [ -s "$DATA_ROOT/$bench/test.jsonl" ] || { echo "ERROR: missing $DATA_ROOT/$bench/test.jsonl" >&2; exit 2; }
+    [ -s "$(data_for "$bench")" ] || { echo "ERROR: missing $(data_for "$bench")" >&2; exit 2; }
     canvas_for "$bench" >/dev/null
 done
 
@@ -124,15 +138,15 @@ for bench in $BENCHMARKS; do
     EXPERIMENT_PHYSICAL_GPU_ID="${PAIR//,/+}" CUDA_VISIBLE_DEVICES="$PAIR" \
     PYTHONPATH="$SDAR_OVERLAY:$PYTHONPATH" \
     "$PYTHON_BIN" -u "$HARNESS_DIR/scripts/run_benchmark.py" \
-        --dataset "$DATA_ROOT/$bench/test.jsonl" \
+        --dataset "$(data_for "$bench")" \
         --output-root "$OUTPUT_ROOT/$bench" \
         --continuation-length "$(canvas_for "$bench")" \
         --verifier-microbatch-size "$GROUP_ROWS" \
         --model "$PROPOSER_MODEL" --family sdar --block-length "$BLOCK" "${PROPOSER_ARGS[@]}" \
         --verifier-model "$VERIFIER_MODEL" --verifier-family sdar "${VERIFIER_ARGS[@]}" \
         --dtype bfloat16 --seed "$SEED" \
-        --timing-repeats 1 --trace-limit "$TRACE_LIMIT" --require-lean-logits \
-        --max-candidates "$BLOCK" --sample-size "$TASKS" --local-files-only \
+        --timing-repeats 1 --warmup-runs 3 --trace-limit "$TRACE_LIMIT" --require-lean-logits \
+        --max-candidates "$BLOCK" "${SAMPLE_ARGS[@]}" --local-files-only \
         --vocab-limit "$VOCAB_LIMIT" \
         --adaptive-temperature 0.0 --adaptive-confidence logp \
         --methods "${METHODS[@]}" \

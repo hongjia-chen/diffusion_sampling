@@ -246,6 +246,7 @@ def run_method(
     timing_repeats: int,
     trace_limit: int,
     profile_limit: int = 0,
+    warmup_runs: int = 1,
     use_chat_template: bool,
     overwrite: bool,
     base_seed: int = 0,
@@ -339,17 +340,19 @@ def run_method(
     }
     write_json(metadata_path, metadata)
 
-    # One untimed warmup keeps startup/JIT work out of the first task latency.
+    # Untimed warmups keep startup/JIT/allocator work out of the first task
+    # latencies (SimSD uses 3). They reuse the first pending task.
     first_pending = next((row for row in rows if str(row["example_id"]) not in completed), None)
     # A VGB warmup is a whole extra task (minutes), and its latency is not a
     # headline number; skip it.
     if first_pending is not None and not vgb:
         rendered = provider.render_prompt(first_pending["prompt"], use_chat_template=use_chat_template)
         prompt_ids = provider.encode_prompt(rendered)
-        torch.manual_seed(task_seed(base_seed, config.label, "__warmup__"))
-        sample(provider, prompt_ids, config, capture_traces=False, verifier=verifier,
-               verifier_prompt_ids=verifier_prompt(first_pending["prompt"]))
-        sync()
+        for _ in range(warmup_runs):
+            torch.manual_seed(task_seed(base_seed, config.label, "__warmup__"))
+            sample(provider, prompt_ids, config, capture_traces=False, verifier=verifier,
+                   verifier_prompt_ids=verifier_prompt(first_pending["prompt"]))
+            sync()
 
     for task_index, row in enumerate(rows):
         example_id = str(row["example_id"])
@@ -366,6 +369,7 @@ def run_method(
             )
 
         latencies: list[float] = []
+        prefills: list[float] = []
         peaks: list[int] = []
         device_peaks: list[list[int]] = []
         verifier_peaks: list[int] = []
@@ -385,6 +389,8 @@ def run_method(
             # forward is, and timing only one device would undercount.
             sync()
             latencies.append(time.perf_counter() - started)
+            if result.prefill_seconds is not None:
+                prefills.append(result.prefill_seconds)
             # A split model's footprint is the sum over its cards; the
             # per-card list is what says whether each one fits.
             per_device = [peak_memory(device) for device in proposer_devices]
@@ -493,6 +499,9 @@ def run_method(
             "verifier_rows": canonical.verifier_rows,
             "verifier_forward_passes": canonical.verifier_forward_passes,
             "wall_time_seconds": latency,
+            # Part of wall_time_seconds spent on the prompt prefill. Decode
+            # throughput (SimSD's "decoded tokens per second") excludes it.
+            "prefill_seconds": statistics.median(prefills) if prefills else None,
             "canvas_token_count": canvas_token_count,
             "tokens_per_second": (
                 len(canonical.continuation_token_ids) / latency if latency > 0 else float("nan")
@@ -576,6 +585,8 @@ def main() -> None:
     parser.add_argument("--continuation-length", type=int, required=True)
     parser.add_argument("--verifier-microbatch-size", type=int, default=8)
     parser.add_argument("--timing-repeats", type=int, default=3)
+    parser.add_argument("--warmup-runs", type=int, default=1,
+                        help="untimed generations per method before the timed tasks")
     parser.add_argument(
         "--trace-limit",
         type=int,
@@ -668,6 +679,8 @@ def main() -> None:
     args = parser.parse_args()
     if args.timing_repeats < 1:
         parser.error("--timing-repeats must be positive")
+    if args.warmup_runs < 0:
+        parser.error("--warmup-runs must be non-negative")
     rows = list(stream_jsonl(args.dataset))
     benchmark = validate_records(rows)
     if args.limit is not None and args.sample_size is not None:
@@ -764,6 +777,12 @@ def main() -> None:
         "devices": [str(device) for device in provider.devices],
         "layer_split": provider.layer_split,
         "physical_gpu": os.environ.get("EXPERIMENT_PHYSICAL_GPU_ID"),
+        "gpu_names": sorted({
+            torch.cuda.get_device_name(device)
+            for device in list(provider.devices) + (list(verifier.devices) if verifier else [])
+            if torch.device(device).type == "cuda"
+        }),
+        "warmup_runs": args.warmup_runs,
         "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
         "python": sys.version.split()[0],
         "torch": torch.__version__,
@@ -793,6 +812,7 @@ def main() -> None:
             timing_repeats=args.timing_repeats,
             trace_limit=args.trace_limit,
             profile_limit=args.profile_stages,
+            warmup_runs=args.warmup_runs,
             use_chat_template=not args.no_chat_template,
             overwrite=args.overwrite,
             base_seed=args.seed,

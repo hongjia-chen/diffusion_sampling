@@ -5,7 +5,7 @@ import torch
 
 from sdar_harness.blockwise import generate_blockwise
 from sdar_harness.scheduler import GenerationConfig
-from sdar_harness.timing import NULL_TIMER, StageTimer
+from sdar_harness.timing import NULL_TIMER, SpanClock, StageTimer
 from tests.test_blockwise import build
 
 
@@ -87,3 +87,36 @@ def test_adaptive_profiling_separates_proposer_from_verifier() -> None:
         provider, prompt, config, timer=StageTimer(torch.device("cpu"), enabled=True)
     )
     assert set(result.stage_seconds) == {"proposer", "verifier", "commit"}
+
+
+def test_every_block_run_records_its_prefill_inside_the_timed_run() -> None:
+    _, provider = build(block_length=4)
+    prompt = torch.arange(8, dtype=torch.long).unsqueeze(0) % 5
+    config = GenerationConfig(
+        method="fixed", continuation_length=8, fixed_k=2,
+        max_candidates=4, verifier_microbatch_size=2,
+    )
+    result = generate_blockwise(provider, prompt, config)
+    assert result.prefill_seconds is not None and result.prefill_seconds >= 0
+    # Recording it is not profiling: the stage breakdown stays empty.
+    assert result.stage_seconds == {}
+
+
+def test_span_clock_on_the_host_and_before_it_ran() -> None:
+    clock = SpanClock([torch.device("cpu")])
+    assert clock.seconds() is None
+    clock.start()
+    clock.stop()
+    assert clock.seconds() >= 0
+
+
+def test_span_clock_reads_cuda_events_without_syncing_inside_the_span() -> None:
+    if not torch.cuda.is_available():
+        return
+    device = torch.device("cuda:0")
+    clock = SpanClock([device, device])
+    assert clock.devices == [device]
+    clock.start()
+    torch.ones(256, 256, device=device) @ torch.ones(256, 256, device=device)
+    clock.stop()
+    assert clock.seconds() > 0

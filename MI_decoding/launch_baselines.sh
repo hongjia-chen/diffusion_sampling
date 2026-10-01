@@ -7,15 +7,16 @@
 #                (B=4, k=1 is the published Table 2 setting). k <= block.
 #   dynamic:θ    SDAR's low_confidence_dynamic: every token with p > θ, at least 1
 #
-# Everything else is the exp05/exp06 recipe: greedy T=0, logp confidence,
-# max_candidates = block, 100 tasks per benchmark sampled with seed 271828,
-# canvases GSM8K 256 / HumanEval+ 512 / MBPP+ 256 / MATH-500 1024, early stop at
-# the first settled stop token, logits over IDs < 151665, bf16, one timed repeat.
-# It is NOT SDAR's OpenCompass protocol (../harness/AUDIT.md).
+# Recipe: greedy T=0, logp confidence, max_candidates = block, full test sets
+# (TASKS=N samples N per benchmark with seed 271828 instead), canvases GSM8K 512
+# / HumanEval+ 768 / MBPP+ 512 / MATH-500 2048, early stop at the first settled
+# stop token, logits over IDs < 151665, bf16, 3 untimed warmups and one timed
+# repeat per task. It is NOT SDAR's OpenCompass protocol (../harness/AUDIT.md).
 #
 #   bash launch_baselines.sh                                         # 1.7B-b64 on card 0
 #   MODEL=../models/SDAR-1.7B-Chat-local bash launch_baselines.sh   # b4: fixed:1,2,4 + dynamic
 #   MODEL=../models/SDAR-8B-Chat-b64-local CARDS=0,1 bash launch_baselines.sh
+#   TASKS=200 bash launch_baselines.sh                               # screening subset
 #   TASKS=3 OUTPUT_ROOT=outputs/smoke LOG_ROOT=logs/smoke bash launch_baselines.sh
 #   DRY_RUN=1 bash launch_baselines.sh
 #
@@ -33,9 +34,9 @@ export CUBLAS_WORKSPACE_CONFIG="${CUBLAS_WORKSPACE_CONFIG:-:4096:8}"
 PYTHON_BIN="${PYTHON_BIN:-${HOME}/miniconda3/envs/diffusion/bin/python}"
 MODEL="${MODEL:-$PROJECT_DIR/../models/SDAR-1.7B-Chat-b64-local}"
 CARDS="${CARDS:-0}"
-TASKS="${TASKS:-100}"
+TASKS="${TASKS:-all}"
 SEED="${SEED:-271828}"
-BENCHMARKS="${BENCHMARKS:-gsm8k mbpp_plus humaneval_plus}"
+BENCHMARKS="${BENCHMARKS:-gsm8k math_500 mbpp_plus humaneval_plus}"
 DATA_ROOT="${DATA_ROOT:-$PROJECT_DIR/../data}"
 SDAR_OVERLAY="${SDAR_OVERLAY:-$HARNESS_DIR/vendor_env/tf452}"
 EVALPLUS_WORKERS="${EVALPLUS_WORKERS:-4}"
@@ -53,22 +54,39 @@ BLOCK="$(PYTHONPATH="$HARNESS_DIR" "$PYTHON_BIN" -c \
 if [ -z "${METHODS:-}" ]; then
     METHODS=""
     for k in 1 2 4 8; do [ "$k" -le "$BLOCK" ] && METHODS="$METHODS fixed:$k"; done
-    METHODS="$METHODS dynamic:0.95 dynamic:0.90 dynamic:0.80 dynamic:0.70"
+    # SDAR uses 0.9 (README / JetEngine) and 0.95 (eval config); the lower end
+    # reaches the tokens-per-step range the MI rule operates in.
+    METHODS="$METHODS dynamic:0.99 dynamic:0.95 dynamic:0.90 dynamic:0.80 dynamic:0.70 dynamic:0.50 dynamic:0.30"
 fi
 read -r -a METHOD_LIST <<< "$METHODS"
 RUN_NAME="${RUN_NAME:-${MODEL_NAME%-local}}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-$PROJECT_DIR/outputs/baselines/$RUN_NAME}"
 LOG_ROOT="${LOG_ROOT:-$PROJECT_DIR/logs/baselines/$RUN_NAME}"
 
+# Longer than exp05/06 (256/512/256/1024), where 13-16% of MATH answers and
+# 1-6% of GSM8K answers hit the canvas. Early stop makes unused canvas free,
+# and blocks are causal, so answers that ended earlier are unchanged.
 canvas_for() {
     case "$1" in
-        gsm8k) echo 256 ;;
-        humaneval_plus) echo 512 ;;
-        mbpp_plus) echo 256 ;;
-        math_500) echo 1024 ;;
+        gsm8k) echo 512 ;;
+        humaneval_plus) echo 768 ;;
+        mbpp_plus) echo 512 ;;
+        math_500) echo 2048 ;;
         *) echo "ERROR: no canvas for $1" >&2; exit 2 ;;
     esac
 }
+
+# GSM8K runs on the full 1,319-problem test set; its frozen 500-task sample
+# (../data/gsm8k) is a subset with identical records.
+data_for() {
+    case "$1" in
+        gsm8k) echo "$DATA_ROOT/gsm8k_full/test.jsonl" ;;
+        *) echo "$DATA_ROOT/$1/test.jsonl" ;;
+    esac
+}
+
+SAMPLE_ARGS=()
+[ "$TASKS" = "all" ] || SAMPLE_ARGS=(--sample-size "$TASKS")
 
 IFS=, read -r -a CARD_LIST <<< "$CARDS"
 case "${#CARD_LIST[@]}" in
@@ -81,7 +99,7 @@ mkdir -p "$OUTPUT_ROOT" "$LOG_ROOT"
 echo "== preconditions =="
 [ -d "$SDAR_OVERLAY" ] || { echo "ERROR: missing $SDAR_OVERLAY" >&2; exit 2; }
 for bench in $BENCHMARKS; do
-    [ -s "$DATA_ROOT/$bench/test.jsonl" ] || { echo "ERROR: missing $DATA_ROOT/$bench/test.jsonl" >&2; exit 2; }
+    [ -s "$(data_for "$bench")" ] || { echo "ERROR: missing $(data_for "$bench")" >&2; exit 2; }
     canvas_for "$bench" >/dev/null
 done
 # Refuse to share a card with anyone else's job (process owner, not memory).
@@ -105,7 +123,7 @@ MI_decoding SDAR baselines: $MODEL_NAME (trained block $BLOCK, decoded at $BLOCK
 started: $(date '+%Y-%m-%d %H:%M:%S %Z')   host: $(hostname)   cards: $CARDS
 methods: ${METHOD_LIST[*]}
 benchmarks: $BENCHMARKS (canvas $(for b in $BENCHMARKS; do printf '%s=%s ' "$b" "$(canvas_for "$b")"; done))
-tasks: $TASKS   seed: $SEED   block: $BLOCK   vocab_limit: $VOCAB_LIMIT
+tasks: $TASKS per benchmark   seed: $SEED   block: $BLOCK   vocab_limit: $VOCAB_LIMIT   warmups: 3
 recipe: greedy T=0, logp confidence, max_candidates=$BLOCK, early stop on
 output: $OUTPUT_ROOT
 INFO
@@ -117,14 +135,14 @@ for bench in $BENCHMARKS; do
     EXPERIMENT_PHYSICAL_GPU_ID="${CARDS//,/+}" CUDA_VISIBLE_DEVICES="$CARDS" \
     PYTHONPATH="$SDAR_OVERLAY:$PYTHONPATH" \
     "$PYTHON_BIN" -u "$HARNESS_DIR/scripts/run_benchmark.py" \
-        --dataset "$DATA_ROOT/$bench/test.jsonl" \
+        --dataset "$(data_for "$bench")" \
         --output-root "$OUTPUT_ROOT/$bench" \
         --continuation-length "$(canvas_for "$bench")" \
         --verifier-microbatch-size "$MICROBATCH" \
         --model "$MODEL" --family sdar --block-length "$BLOCK" "${DEVICE_ARGS[@]}" \
         --dtype bfloat16 --seed "$SEED" \
-        --timing-repeats 1 --trace-limit 0 --require-lean-logits \
-        --max-candidates "$BLOCK" --sample-size "$TASKS" --local-files-only \
+        --timing-repeats 1 --warmup-runs 3 --trace-limit 0 --require-lean-logits \
+        --max-candidates "$BLOCK" "${SAMPLE_ARGS[@]}" --local-files-only \
         --vocab-limit "$VOCAB_LIMIT" \
         --fixed-temperature 0.0 --fixed-confidence logp \
         --dynamic-temperature 0.0 --dynamic-confidence logp \

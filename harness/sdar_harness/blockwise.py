@@ -43,7 +43,7 @@ from sdar_harness.scheduler import (
     stop_token_ids,
     truncate_at_stop,
 )
-from sdar_harness.timing import NULL_TIMER, StageTimer
+from sdar_harness.timing import NULL_TIMER, SpanClock, StageTimer
 
 
 def _cache_base():
@@ -211,6 +211,8 @@ def generate_blockwise(
     prefill_length = prefill_blocks * block
     commit_passes = 0
 
+    prefill_clock = SpanClock(getattr(provider, "devices", [device]))
+    prefill_clock.start()
     if prefill_length:
         # The prompt's own blocks. Not all-ones: block 0 must not see block 1.
         with timer("commit"):
@@ -221,6 +223,7 @@ def generate_blockwise(
                 cache,
             )
         commit_passes += 1
+    prefill_clock.stop()
 
     stop_ids = stop_token_ids(provider)
     canvas_low, canvas_high = prompt_length, prompt_length + generated
@@ -311,6 +314,7 @@ def generate_blockwise(
         stop_token_id=stop_token,
         early_stopped=early_stopped,
         decoded_positions=sum(1 for value in continuation if value != provider.mask_token_id),
+        prefill_seconds=prefill_clock.seconds(),
     )
     return GenerationResult(
         denoising_steps=steps,

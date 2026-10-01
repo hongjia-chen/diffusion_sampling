@@ -165,6 +165,10 @@ class GenerationResult:
     # otherwise -- profiling is opt-in and costs a pair of CUDA events per
     # stage occurrence.
     stage_seconds: dict[str, float] = field(default_factory=dict)
+    # Wall time of the prompt prefill (the KV-cache commit of the prompt's
+    # whole blocks), measured inside every timed run without synchronizing.
+    # None for samplers that have no separate prefill.
+    prefill_seconds: float | None = None
 
 
 def _filtered_log_probs(logits: torch.Tensor, excluded: set[int]) -> torch.Tensor:
