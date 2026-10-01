@@ -141,7 +141,7 @@ def main() -> None:
     parser.add_argument("--reference", default=str(HERE / "../models/SDAR-1.7B-Chat-b64-local"))
     parser.add_argument("--target-devices", nargs="+", default=["cuda:0", "cuda:1"])
     parser.add_argument("--reference-device", default="cuda:2")
-    parser.add_argument("--dataset", default=str(HERE / "../data/gsm8k/test.jsonl"))
+    parser.add_argument("--dataset", default=str(HERE / "../data/sample100/gsm8k.jsonl"))
     parser.add_argument("--prompts", type=int, default=2)
     parser.add_argument("--blocks", type=int, default=1)
     parser.add_argument("--budget", type=int, default=400)

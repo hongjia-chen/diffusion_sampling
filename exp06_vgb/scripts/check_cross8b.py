@@ -212,7 +212,10 @@ def main() -> None:
 
     tasks = []
     for bench in ("gsm8k", "mbpp_plus", "humaneval_plus"):
-        rows = [json.loads(line) for line in (DATA / bench / "test.jsonl").open()]
+        # The exact 100 tasks of the runs. Since data/ was reorganized on
+        # 2026-10-01 the 3 pilot IDs below come from those 100 rather than from
+        # the old full file, so they no longer match cross8b_pilot.
+        rows = [json.loads(line) for line in (DATA / "sample100" / f"{bench}.jsonl").open()]
         sample = select_sample(rows, 100, 271828)
         pilot_ids = select_sample(rows, 3, 271828)
         if bench == "humaneval_plus":

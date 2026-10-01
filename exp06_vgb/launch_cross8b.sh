@@ -78,7 +78,7 @@ for path in "$PROPOSER_MODEL" "$VERIFIER_MODEL" "$SDAR_OVERLAY"; do
     [ -d "$path" ] || { echo "ERROR: missing $path" >&2; exit 2; }
 done
 for bench in $BENCHMARKS; do
-    [ -s "$DATA_ROOT/$bench/test.jsonl" ] || { echo "ERROR: missing $DATA_ROOT/$bench/test.jsonl" >&2; exit 2; }
+    [ -s "$DATA_ROOT/sample100/$bench.jsonl" ] || { echo "ERROR: missing $DATA_ROOT/sample100/$bench.jsonl" >&2; exit 2; }
     canvas_for "$bench" >/dev/null
 done
 
@@ -117,7 +117,7 @@ for bench in $BENCHMARKS; do
     EXPERIMENT_PHYSICAL_GPU_ID="${PAIR//,/+}" CUDA_VISIBLE_DEVICES="$PAIR" \
     PYTHONPATH="$SDAR_OVERLAY:$PYTHONPATH" \
     "$PYTHON_BIN" -u "$HARNESS_DIR/scripts/run_benchmark.py" \
-        --dataset "$DATA_ROOT/$bench/test.jsonl" \
+        --dataset "$DATA_ROOT/sample100/$bench.jsonl" \
         --output-root "$OUTPUT_ROOT/$bench" \
         --continuation-length "$(canvas_for "$bench")" \
         --verifier-microbatch-size "$GROUP_ROWS" \

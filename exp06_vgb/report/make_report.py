@@ -575,7 +575,7 @@ def build_examples(tok) -> list[dict]:
         prompt = tj.records(tj.ARMS["sdar8b"][2](bench))[eid]["raw_prompt"]
         gold = None
         if bench == "gsm8k":
-            gold = next(json.loads(l)["target"] for l in (tj.DATA / bench / "test.jsonl").open()
+            gold = next(json.loads(l)["target"] for l in (tj.DATA / "full" / f"{bench}.jsonl").open()
                         if json.loads(l)["example_id"] == eid)
         out.append({
             "category": category, "categoryLabel": tj.CATEGORY_LABEL[category], "bench": bench,

@@ -53,7 +53,7 @@ def records(path: Path) -> list[dict]:
 
 
 def dataset_rows(bench: str) -> dict[str, dict]:
-    path = PROJECT.parent / "data" / bench / "test.jsonl"
+    path = PROJECT.parent / "data" / "full" / f"{bench}.jsonl"
     return {row["example_id"]: row for row in map(json.loads, path.open(encoding="utf-8"))}
 
 

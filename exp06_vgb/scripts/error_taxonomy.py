@@ -291,7 +291,7 @@ def arithmetic_slips(text: str) -> list[str]:
 
 
 def gold(bench: str) -> dict[str, dict]:
-    return {r["example_id"]: r for r in map(json.loads, (PROJECT.parent / "data" / bench / "test.jsonl").open())}
+    return {r["example_id"]: r for r in map(json.loads, (PROJECT.parent / "data" / "full" / f"{bench}.jsonl").open())}
 
 
 def dump(args) -> None:

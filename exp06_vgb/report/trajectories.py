@@ -140,7 +140,7 @@ def plan(which: str = "base") -> None:
     for bench in BENCHMARKS:
         wanted = [eid for _, b, eid, _, _ in SELECTION if b == bench]
         order = list(records(ARMS["remask_0p10"][2](bench)))
-        rows = {r["example_id"]: r for r in map(json.loads, (DATA / bench / "test.jsonl").open())}
+        rows = {r["example_id"]: r for r in map(json.loads, (DATA / "full" / f"{bench}.jsonl").open())}
         subset = TRACED / "subsets" / f"{bench}.jsonl"
         subset.parent.mkdir(parents=True, exist_ok=True)
         subset.write_text("".join(json.dumps(rows[i]) + "\n" for i in order if i in wanted), encoding="utf-8")

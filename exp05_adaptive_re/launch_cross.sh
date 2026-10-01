@@ -86,7 +86,7 @@ echo "== preconditions =="
 [ -d "$SDAR_MODEL" ] || { echo "ERROR: no checkpoint at $SDAR_MODEL" >&2; exit 2; }
 [ -d "$SDAR_OVERLAY" ] || { echo "ERROR: no transformers overlay at $SDAR_OVERLAY" >&2; exit 2; }
 for bench in "${BENCH_LIST[@]}"; do
-    [ -s "$DATA_ROOT/$bench/test.jsonl" ] || { echo "ERROR: missing $DATA_ROOT/$bench/test.jsonl" >&2; exit 2; }
+    [ -s "$DATA_ROOT/sample100/$bench.jsonl" ] || { echo "ERROR: missing $DATA_ROOT/sample100/$bench.jsonl" >&2; exit 2; }
     canvas_for "$bench" >/dev/null
 done
 for gpu in 0 1 2 3; do
@@ -132,7 +132,7 @@ run_worker() {
         CUDA_VISIBLE_DEVICES="$sdar_gpu,$dream_gpu" \
         PYTHONPATH="$SDAR_OVERLAY:$PYTHONPATH" \
         "$PYTHON_BIN" -u "$HARNESS_DIR/scripts/run_benchmark.py" \
-            --dataset "$DATA_ROOT/$bench/test.jsonl" \
+            --dataset "$DATA_ROOT/sample100/$bench.jsonl" \
             --output-root "$OUTPUT_ROOT/$bench" \
             --continuation-length "$(canvas_for "$bench")" \
             --verifier-microbatch-size "$MICROBATCH" \

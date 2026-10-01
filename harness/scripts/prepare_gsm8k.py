@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """GSM8K records in the harness format (ported from exp04's prepare_gsm8k.py).
 
-    python scripts/prepare_gsm8k.py --output-dir ../data/gsm8k_full --test-size 0
+    python scripts/prepare_gsm8k.py --output-dir /tmp/gsm8k --test-size 0
+    # then: test.jsonl -> ../data/full/gsm8k.jsonl, test.metadata.json -> gsm8k.metadata.json
 
 `--test-size 0` writes the whole 1,319-problem test split in source order:
-the full set for paper numbers. The default 500 is how the frozen
-`../data/gsm8k` sample was drawn; do not regenerate that one (its
-PORTED_FROM.txt explains why). Records are identical either way, so the
-frozen sample's tasks are exactly the full set's records with the same IDs.
+the full set for paper numbers. The default 500 is how exp03's frozen GSM8K
+sample was drawn (seed 12345), from which ../data/sample100/gsm8k.jsonl comes.
+Records are identical either way, so every sampled task is exactly the full
+set's record with the same ID.
 """
 from __future__ import annotations
 

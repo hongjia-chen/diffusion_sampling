@@ -106,7 +106,7 @@ if [ "$REFERENCE_MATH" = "1" ]; then
 fi
 [ -d "$SDAR_OVERLAY" ] || { echo "ERROR: no transformers overlay at $SDAR_OVERLAY" >&2; exit 2; }
 for bench in "${BENCH_LIST[@]}"; do
-    [ -s "$DATA_ROOT/$bench/test.jsonl" ] || { echo "ERROR: missing $DATA_ROOT/$bench/test.jsonl" >&2; exit 2; }
+    [ -s "$DATA_ROOT/sample100/$bench.jsonl" ] || { echo "ERROR: missing $DATA_ROOT/sample100/$bench.jsonl" >&2; exit 2; }
     canvas_for "$bench" >/dev/null
 done
 busy=""
@@ -155,7 +155,7 @@ cat "$LOG_ROOT/RUNINFO.txt"
 recipe_args() {
     local bench="$1"
     printf '%s\n' \
-        --dataset "$DATA_ROOT/$bench/test.jsonl" \
+        --dataset "$DATA_ROOT/sample100/$bench.jsonl" \
         --continuation-length "$(canvas_for "$bench")" \
         --verifier-microbatch-size "$MICROBATCH" \
         --family sdar --block-length "$BLOCK" --dtype bfloat16 --seed "$SEED" \
