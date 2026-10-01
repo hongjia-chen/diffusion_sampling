@@ -55,6 +55,7 @@ Learning Unmasking Policies [2512.09106](https://arxiv.org/abs/2512.09106).
 | ours | SDAR-8B-b64 `fixed:2` / `fixed:4` | same | 28.0 / 54.5 |
 | ours | MI, 8B proposes / 1.7B verifies, δ 0.1 / δ 1 | same | 22.2 / 32.4 |
 | ours | SDAR-1.7B-b64 `fixed:1` | 1× A4000, bf16, HF eager | 23.9 |
+| ours, **SimSD's Vanilla protocol** (2026-10-01; 20 GSM8K tasks, 1 token/step, max 512, 3 warmups, decode tok/s) | SDAR-8B, B=4 / B=8 / B=64 (b64 weights at B=4/8: timing only, out of distribution) | 2× A4000 pipeline, bf16, HF eager | **15.1 / 16.5 / 14.3** (52 / 53 / 58 ms per forward) |
 | SimSD Table 1 (decode only) | SDAR-8B, B=4, Vanilla | 2× RTX PRO 6000 Blackwell, FP32, TP=2, KV cache (engine not stated) | 10.0 |
 | SimSD | same, Vanilla + CUDA Graph | same | 50.1 |
 | SimSD | SimSD (1.7B drafts) | same | 72.6 |
@@ -62,6 +63,12 @@ Learning Unmasking Policies [2512.09106](https://arxiv.org/abs/2512.09106).
 | S2D2 | SDAR-8B: dynamic 2.6×, S2D2 3.8× over AR (block size 1) | 1× H100 | speedups only |
 
 Reading:
+- Under SimSD's own protocol our harness gives 15.1 tok/s at B=4 and 16.5 at
+  B=8, against their Vanilla's 10.0 and 15.3. Ours scales with forward count
+  (1.27 → 1.16 forwards per token, 1.09×); theirs gains 1.53×, which points to
+  extra per-block overhead in their Vanilla. At B=64, about 17% of forwards
+  decode positions after the stop token inside the last block, which output
+  tok/s does not count.
 - Our eager numbers sit in the same range as SimSD's eager "Vanilla", so the
   harness is not unusually slow.
 - Every strong published baseline uses CUDA graphs (SimSD's +CG is 5.4× its
