@@ -13,6 +13,7 @@
 #
 #   bash launch_mi.sh                         # refuses if another user's job is on the cards
 #   TASKS=200 bash launch_mi.sh                # screening subset (default: full sets)
+#   TASKS=100 bash launch_mi.sh                # exp04-06's 100 tasks (../data/sample100)
 #   TASKS=5 OUTPUT_ROOT=outputs/mi_pilot LOG_ROOT=logs/mi_pilot bash launch_mi.sh
 #   DELTAS="0.10 1.00" bash launch_mi.sh
 #   VARIANTS="xadaptive xadaptive-remask" bash launch_mi.sh   # exp06's remask arm too
@@ -78,15 +79,15 @@ canvas_for() {
     esac
 }
 
+# ../data/README.md: full/ holds the complete test sets, sample100/ the exact
+# 100-task samples exp04-06 ran on (TASKS=100 uses those, so runs stay paired).
 data_for() {
-    case "$1" in
-        gsm8k) echo "$DATA_ROOT/gsm8k_full/test.jsonl" ;;
-        *) echo "$DATA_ROOT/$1/test.jsonl" ;;
-    esac
+    if [ "$TASKS" = "100" ]; then echo "$DATA_ROOT/sample100/$1.jsonl"
+    else echo "$DATA_ROOT/full/$1.jsonl"; fi
 }
 
 SAMPLE_ARGS=()
-[ "$TASKS" = "all" ] || SAMPLE_ARGS=(--sample-size "$TASKS")
+case "$TASKS" in all|100) ;; *) SAMPLE_ARGS=(--sample-size "$TASKS") ;; esac
 
 METHODS=()
 for variant in $VARIANTS; do
@@ -127,6 +128,7 @@ started: $(date '+%Y-%m-%d %H:%M:%S %Z')   host: $(hostname)   cards: $PAIR
 methods: ${METHODS[*]}
 benchmarks: $BENCHMARKS (canvas $(for b in $BENCHMARKS; do printf '%s=%s ' "$b" "$(canvas_for "$b")"; done))
 tasks: $TASKS   seed: $SEED   block: $BLOCK   verifier group rows: $GROUP_ROWS   vocab_limit: $VOCAB_LIMIT
+data: $(dirname -- "$(data_for gsm8k)")
 proposer: $PROPOSER_MODEL (${PROPOSER_ARGS[*]}, greedy, logp)   verifier: $VERIFIER_MODEL (${VERIFIER_ARGS[*]}, veto off)
 output: $OUTPUT_ROOT
 INFO

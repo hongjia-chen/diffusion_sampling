@@ -17,6 +17,7 @@
 #   MODEL=../models/SDAR-1.7B-Chat-local bash launch_baselines.sh   # b4: fixed:1,2,4 + dynamic
 #   MODEL=../models/SDAR-8B-Chat-b64-local CARDS=0,1 bash launch_baselines.sh
 #   TASKS=200 bash launch_baselines.sh                               # screening subset
+#   TASKS=100 bash launch_baselines.sh                               # exp04-06's 100 tasks (../data/sample100)
 #   TASKS=3 OUTPUT_ROOT=outputs/smoke LOG_ROOT=logs/smoke bash launch_baselines.sh
 #   DRY_RUN=1 bash launch_baselines.sh
 #
@@ -76,17 +77,15 @@ canvas_for() {
     esac
 }
 
-# GSM8K runs on the full 1,319-problem test set; its frozen 500-task sample
-# (../data/gsm8k) is a subset with identical records.
+# ../data/README.md: full/ holds the complete test sets, sample100/ the exact
+# 100-task samples exp04-06 ran on (TASKS=100 uses those, so runs stay paired).
 data_for() {
-    case "$1" in
-        gsm8k) echo "$DATA_ROOT/gsm8k_full/test.jsonl" ;;
-        *) echo "$DATA_ROOT/$1/test.jsonl" ;;
-    esac
+    if [ "$TASKS" = "100" ]; then echo "$DATA_ROOT/sample100/$1.jsonl"
+    else echo "$DATA_ROOT/full/$1.jsonl"; fi
 }
 
 SAMPLE_ARGS=()
-[ "$TASKS" = "all" ] || SAMPLE_ARGS=(--sample-size "$TASKS")
+case "$TASKS" in all|100) ;; *) SAMPLE_ARGS=(--sample-size "$TASKS") ;; esac
 
 IFS=, read -r -a CARD_LIST <<< "$CARDS"
 case "${#CARD_LIST[@]}" in
@@ -125,6 +124,7 @@ methods: ${METHOD_LIST[*]}
 benchmarks: $BENCHMARKS (canvas $(for b in $BENCHMARKS; do printf '%s=%s ' "$b" "$(canvas_for "$b")"; done))
 tasks: $TASKS per benchmark   seed: $SEED   block: $BLOCK   vocab_limit: $VOCAB_LIMIT   warmups: 3
 recipe: greedy T=0, logp confidence, max_candidates=$BLOCK, early stop on
+data: $(dirname -- "$(data_for gsm8k)")
 output: $OUTPUT_ROOT
 INFO
 cat "$LOG_ROOT/RUNINFO.txt"

@@ -46,6 +46,7 @@ forward to write its KV cache. At B=4 that is 5 forwards per 4 tokens for
 ## Running
 
 ```bash
+bash launch_b4_quality.sh        # B=4 anchors: SDAR-1.7B-Chat + SDAR-8B-Chat, fixed:1,2,4 + dynamic 0.95/0.90, full sets
 bash launch_baselines.sh                                          # SDAR-1.7B-b64, card 0
 MODEL=../models/SDAR-1.7B-Chat-local CARDS=1 bash launch_baselines.sh   # SDAR-1.7B b4
 MODEL=../models/SDAR-8B-Chat-b64-local CARDS=0,1 bash launch_baselines.sh
@@ -59,9 +60,11 @@ processes and refuse to share a card.
 
 **Recipe** (both launchers): greedy T=0, logp confidence, max_candidates =
 block, early stop at the first settled stop token, logits over IDs < 151665,
-bf16. Benchmarks are GSM8K (the full 1,319-problem set, `../data/gsm8k_full`),
-MATH-500, MBPP+ (378) and HumanEval+ (164), on full sets by default. `TASKS=N`
-instead samples N per benchmark with seed 271828, for screening.
+bf16. Benchmarks are GSM8K (1,319), MATH-500, MBPP+ (378) and HumanEval+ (164).
+By default the launchers run the full test sets in `../data/full/`.
+`TASKS=100` runs exp04–06's exact 100-task samples (`../data/sample100/`), and
+any other N samples N per benchmark from `full/` with seed 271828, for
+screening. See `../data/README.md`.
 
 Canvases are GSM8K 512, MATH-500 2048, MBPP+ 512 and HumanEval+ 768. exp05/06
 used 256/1024/256/512, and 13–16% of MATH answers hit the limit. Blocks are
