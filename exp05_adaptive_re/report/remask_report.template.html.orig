@@ -1,0 +1,750 @@
+<title>Remasking Diagnosis</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Design system: exp04's Decoding Path Player (report/trajectory_player.template.html),
+   extended with chart series tokens (dataviz reference palette, slots 1-4) and a
+   remask accent. */
+:root {
+  --ground: #f2f3ef;
+  --panel: #ffffff;
+  --ink: #1b201c;
+  --ink-2: #59615a;
+  --ink-3: #8a918b;
+  --rule: #d9ddd5;
+  --grid: #eceee8;
+  --ghost: #e6e9e2;
+  --now: #ffc84a;
+  --recent-1: #ffe29a;
+  --recent-2: #fff1cc;
+  --err: #c2372b;
+  --ok: #2d7a4b;
+  --rm: #6a4fd1;
+  --rm-soft: #ebe6fb;
+  --control: #e8ebe4;
+  --control-on: #1b201c;
+  --control-on-ink: #f2f3ef;
+  --blk: #b9bfb6;
+  --bar-pad: #d3d8cf;
+  --s1: #2a78d6;  /* Dream-7B fixed:k */
+  --s2: #eb6834;  /* SDAR fixed:k */
+  --s3: #1baf7a;  /* SDAR -> Dream, remasking */
+  --s4: #eda100;  /* same, remasking off */
+  --shadow: 0 1px 0 rgba(27, 32, 28, 0.04), 0 8px 24px -16px rgba(27, 32, 28, 0.25);
+  --mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  --sans: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --ground: #0f1210; --panel: #171b18; --ink: #e3e7e1; --ink-2: #a2aaa3; --ink-3: #6f776f;
+    --rule: #2a302b; --grid: #202521; --ghost: #232924; --now: #c98e0a; --recent-1: #6d5212; --recent-2: #3b321b;
+    --err: #ff6f61; --ok: #62c98b; --rm: #a594f5; --rm-soft: #2c2645;
+    --control: #232924; --control-on: #e3e7e1; --control-on-ink: #0f1210; --blk: #4a524b; --bar-pad: #353c36;
+    --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500;
+    --shadow: 0 1px 0 rgba(0, 0, 0, 0.3), 0 8px 24px -16px rgba(0, 0, 0, 0.8);
+  }
+}
+:root[data-theme="dark"] {
+  --ground: #0f1210; --panel: #171b18; --ink: #e3e7e1; --ink-2: #a2aaa3; --ink-3: #6f776f;
+  --rule: #2a302b; --grid: #202521; --ghost: #232924; --now: #c98e0a; --recent-1: #6d5212; --recent-2: #3b321b;
+  --err: #ff6f61; --ok: #62c98b; --rm: #a594f5; --rm-soft: #2c2645;
+  --control: #232924; --control-on: #e3e7e1; --control-on-ink: #0f1210; --blk: #4a524b; --bar-pad: #353c36;
+  --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500;
+  --shadow: 0 1px 0 rgba(0, 0, 0, 0.3), 0 8px 24px -16px rgba(0, 0, 0, 0.8);
+}
+
+* { box-sizing: border-box; }
+body { background: var(--ground); color: var(--ink); font-family: var(--sans); font-size: 14px; line-height: 1.45; }
+.wrap { max-width: 1480px; margin: 0 auto; padding-inline: 20px; padding-block: 20px 48px; display: grid; gap: 14px; }
+h1 { font-size: 22px; font-weight: 600; letter-spacing: -0.01em; margin: 0; text-wrap: balance; }
+h2.sec { font-size: 16px; font-weight: 600; margin: 18px 0 0; text-wrap: balance; }
+.lede, .sec-lede { color: var(--ink-2); margin: 4px 0 0; max-width: 84ch; }
+.lede code, .sec-lede code, td code { font-family: var(--mono); font-size: 12.5px; }
+.lede b, .sec-lede b { color: var(--ink); font-weight: 600; }
+
+/* charts */
+.charts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.chart-card { background: var(--panel); border: 1px solid var(--rule); border-radius: 8px; padding: 10px 12px 8px; display: grid; gap: 6px; min-width: 0; position: relative; }
+.chart-card h3 { margin: 0; font-size: 14px; font-weight: 600; display: flex; justify-content: space-between; gap: 8px; }
+.chart-card h3 .metric { font-weight: 400; color: var(--ink-3); font-size: 12px; }
+.chart { width: 100%; height: auto; display: block; overflow: visible; }
+.chart text { fill: var(--ink-2); font-family: var(--mono); font-size: 10px; }
+.chart .axis-title { fill: var(--ink-3); font-family: var(--sans); font-size: 10.5px; }
+.chart .pt-label { fill: var(--ink-2); font-size: 9.5px; }
+.legend-row { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: var(--ink-2); }
+.legend-row .key { display: inline-flex; align-items: center; gap: 6px; }
+.legend-row svg { width: 22px; height: 12px; flex: none; overflow: visible; }
+.tip {
+  position: absolute; pointer-events: none; background: var(--panel); border: 1px solid var(--rule); border-radius: 6px;
+  box-shadow: var(--shadow); padding: 6px 8px; font-size: 12px; color: var(--ink); min-width: 150px; z-index: 3;
+}
+.tip .tt { font-weight: 600; }
+.tip .tv { font-family: var(--mono); font-size: 11.5px; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+details.tableview summary { cursor: pointer; font-size: 12px; color: var(--ink-2); }
+.tbl-wrap { overflow-x: auto; }
+table.data { border-collapse: collapse; font-size: 12.5px; margin-top: 6px; width: 100%; }
+table.data th, table.data td { padding: 3px 8px; text-align: right; border-bottom: 1px solid var(--rule); white-space: nowrap; font-variant-numeric: tabular-nums; }
+table.data th { font-weight: 600; color: var(--ink-2); font-size: 11.5px; }
+table.data th:first-child, table.data td:first-child { text-align: left; }
+table.data td.num { font-family: var(--mono); font-size: 12px; }
+.caveat { font-size: 12px; color: var(--ink-3); max-width: 110ch; margin: 0; }
+
+/* impact */
+.impact { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.pos { color: var(--ok); font-weight: 600; }
+.neg { color: var(--err); font-weight: 600; }
+.sig { font-size: 10.5px; border: 1px solid currentColor; border-radius: 3px; padding: 0 3px; margin-left: 3px; }
+
+/* player (from exp04) */
+.picker-wrap { display: grid; gap: 12px; }
+.cat { display: grid; gap: 6px; }
+.cat-label { font-size: 12px; font-weight: 600; color: var(--ink-2); }
+.picker { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.bench { display: grid; gap: 6px; align-content: start; }
+.bench-label { font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-3); }
+.task-btn {
+  appearance: none; border: 1px solid var(--rule); background: var(--panel); color: var(--ink);
+  text-align: left; padding: 7px 10px; border-radius: 6px; cursor: pointer; font: inherit; display: grid; gap: 1px;
+}
+.task-btn .tid { font-family: var(--mono); font-size: 12.5px; font-weight: 500; }
+.task-btn .tnote { font-size: 12px; color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-btn[aria-pressed="true"] { border-color: var(--ink); box-shadow: inset 0 0 0 1px var(--ink); }
+.task-btn:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible { outline: 2px solid var(--now); outline-offset: 2px; }
+.task-head { display: flex; flex-wrap: wrap; gap: 6px 18px; align-items: baseline; }
+.task-head h2 { font-family: var(--mono); font-size: 16px; font-weight: 600; margin: 0; }
+.task-head .note { color: var(--ink-2); max-width: 110ch; }
+.task-head .cat-chip { font-size: 12px; color: var(--ink-2); border: 1px solid var(--rule); border-radius: 3px; padding: 0 6px; }
+details.prompt { width: 100%; }
+details.prompt summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
+details.prompt pre {
+  font-family: var(--mono); font-size: 12px; white-space: pre-wrap; background: var(--panel);
+  border: 1px solid var(--rule); border-radius: 6px; padding: 10px 12px; margin: 6px 0 0; max-height: 14rem; overflow: auto;
+}
+.transport {
+  position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5;
+  background: var(--panel); border: 1px solid var(--rule); border-radius: 8px; box-shadow: var(--shadow);
+  padding: 8px 10px; display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center;
+}
+.group { display: flex; gap: 4px; align-items: center; }
+.group-label { font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-3); margin-right: 2px; }
+button.ctl, .seg button {
+  appearance: none; border: 0; background: var(--control); color: var(--ink); font: inherit; font-size: 13px;
+  padding: 5px 9px; border-radius: 5px; cursor: pointer; min-width: 32px; line-height: 1.2;
+}
+button.ctl:hover, .seg button:hover { filter: brightness(0.96); }
+button.play { min-width: 64px; font-weight: 600; }
+button.jump { background: transparent; border: 1px solid var(--rm); color: var(--rm); font-weight: 500; }
+.seg { display: inline-flex; background: var(--control); border-radius: 6px; padding: 2px; gap: 2px; }
+.seg button { background: transparent; padding: 4px 8px; }
+.seg button[aria-pressed="true"] { background: var(--control-on); color: var(--control-on-ink); }
+.scrub { flex: 1 1 260px; display: flex; gap: 10px; align-items: center; min-width: 0; }
+.scrub input[type="range"] { flex: 1; min-width: 0; accent-color: var(--ink); }
+.readout { font-family: var(--mono); font-size: 12.5px; color: var(--ink-2); font-variant-numeric: tabular-nums; white-space: nowrap; }
+select.ctl { font: inherit; font-size: 13px; background: var(--control); color: var(--ink); border: 0; border-radius: 5px; padding: 4px 6px; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 12px; color: var(--ink-2); align-items: center; }
+.legend span.sw { display: inline-block; font-family: var(--mono); font-size: 11.5px; padding: 0 5px; border-radius: 3px; margin-right: 5px; color: var(--ink); }
+.legend kbd { font-family: var(--mono); font-size: 11px; border: 1px solid var(--rule); border-bottom-width: 2px; border-radius: 3px; padding: 0 4px; background: var(--panel); }
+.panels { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.panel { background: var(--panel); border: 1px solid var(--rule); border-radius: 8px; overflow: hidden; display: grid; grid-template-rows: auto auto 1fr; min-width: 0; }
+.panel.focus { border-color: var(--ink-2); box-shadow: var(--shadow); }
+.p-head { padding: 9px 12px 6px; display: grid; gap: 4px; cursor: pointer; }
+.p-title { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.p-title .swatch { width: 10px; height: 10px; border-radius: 2px; flex: none; }
+.p-title strong { font-weight: 600; font-size: 14px; }
+.p-sub { color: var(--ink-3); font-size: 12px; }
+.chip { font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; padding: 1px 6px; border-radius: 3px; border: 1px solid currentColor; }
+.chip.ok { color: var(--ok); }
+.chip.bad { color: var(--err); }
+.p-stat { display: flex; justify-content: space-between; gap: 10px; font-family: var(--mono); font-size: 12px; color: var(--ink-2); font-variant-numeric: tabular-nums; flex-wrap: wrap; }
+.p-stat .done { color: var(--ok); }
+.p-stat .rmnow { color: var(--rm); font-weight: 600; }
+.strip { display: block; width: 100%; height: 34px; cursor: pointer; border-top: 1px solid var(--rule); border-bottom: 1px solid var(--rule); background: var(--panel); }
+.canvas-box { position: relative; overflow: auto; max-height: 27rem; padding: 10px 12px 14px; }
+.canvas { font-family: var(--mono); font-size: 12.5px; line-height: 1.75; white-space: pre-wrap; word-break: break-word; margin: 0; }
+.t { border-radius: 2px; cursor: pointer; transition: background-color 120ms linear; }
+.t.m { color: transparent; background: var(--ghost); }
+.t.m.nl { background: transparent; }
+.t.now { background: var(--now); color: var(--ink); }
+.t.r1 { background: var(--recent-1); }
+.t.r2 { background: var(--recent-2); }
+.t.sp { font-size: 10.5px; color: var(--ink-3); border: 1px dashed var(--ink-3); padding: 0 2px; }
+.t.sp.m { color: transparent; border-color: transparent; }
+.t.rm:not(.m) { box-shadow: inset 0 0 0 1.5px var(--rm); background: var(--rm-soft); color: var(--ink); }
+.t.rmx:not(.m) { text-decoration: underline wavy var(--rm); text-decoration-thickness: 1.5px; text-underline-offset: 3px; }
+.t.chk { outline: 1px dashed var(--rm); outline-offset: 0; }
+.t.pick { box-shadow: inset 0 0 0 2px var(--rm); background: var(--rm-soft); color: var(--ink); }
+.t.div:not(.m) { border-bottom: 2px solid var(--err); }
+.blk { display: inline-block; width: 0; border-left: 1.5px solid var(--blk); height: 1.2em; vertical-align: -0.25em; margin: 0 1px; }
+.dots .t.m:not(.nl):not(.sp) { font-size: 0; background: transparent; }
+.dots .t.m:not(.nl):not(.sp)::before { content: "·"; font-size: 12.5px; color: var(--ink-3); }
+.inspector { background: var(--panel); border: 1px solid var(--rule); border-radius: 8px; padding: 12px 14px; display: grid; gap: 10px; }
+.i-head { display: flex; flex-wrap: wrap; gap: 4px 14px; align-items: baseline; }
+.i-head h3 { margin: 0; font-size: 15px; font-weight: 600; }
+.i-head .meta { font-family: var(--mono); font-size: 12px; color: var(--ink-2); }
+.i-body { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
+.i-body h4 { margin: 0 0 6px; font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-3); font-weight: 600; }
+.commits { display: flex; flex-wrap: wrap; gap: 4px; max-height: 12rem; overflow: auto; }
+.commit { font-family: var(--mono); font-size: 12px; background: var(--ground); border: 1px solid var(--rule); border-radius: 4px; padding: 1px 6px; white-space: pre; }
+.commit .pos { color: var(--ink-3); }
+.why { color: var(--ink-2); margin: 8px 0 0; }
+.why b { color: var(--ink); font-weight: 600; }
+.why code { font-family: var(--mono); font-size: 12.5px; background: var(--ground); padding: 0 4px; border-radius: 3px; white-space: pre; }
+.errchart { width: 100%; height: auto; display: block; }
+.errchart text { fill: var(--ink-2); font-family: var(--mono); font-size: 10px; }
+table.rmtab { border-collapse: collapse; font-size: 12px; width: 100%; }
+table.rmtab th, table.rmtab td { padding: 2px 6px; border-bottom: 1px solid var(--rule); text-align: right; white-space: pre; font-variant-numeric: tabular-nums; }
+table.rmtab th { color: var(--ink-3); font-weight: 600; font-size: 11px; text-align: right; }
+table.rmtab td.tok { font-family: var(--mono); text-align: left; }
+table.rmtab tr.bottom td { background: var(--ground); }
+table.rmtab tr.chosen td { background: var(--rm-soft); color: var(--ink); font-weight: 600; }
+.final { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
+.final pre { font-family: var(--mono); font-size: 12px; white-space: pre-wrap; word-break: break-word; background: var(--panel); border: 1px solid var(--rule); border-radius: 6px; padding: 8px 10px; margin: 4px 0 0; max-height: 18rem; overflow: auto; }
+.final h4 { margin: 0; font-size: 12px; color: var(--ink-2); font-weight: 600; }
+
+@media (max-width: 1100px) {
+  .charts, .impact { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 860px) {
+  .panels, .i-body, .final { grid-template-columns: minmax(0, 1fr); }
+  .picker { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 520px) {
+  .wrap { padding-inline: 16px; }
+  .canvas-box { max-height: 20rem; }
+}
+@media (prefers-reduced-motion: reduce) { .t { transition: none; } }
+</style>
+
+<div class="wrap">
+  <header>
+    <h1>Remasking Diagnosis</h1>
+    <p class="lede" id="lede"></p>
+  </header>
+
+  <section>
+    <h2 class="sec">Accuracy against throughput</h2>
+    <p class="sec-lede">Output tokens per second at batch 1, log scale, against each benchmark's score, 100 tasks each. Hover a point for its numbers, or open the table.</p>
+  </section>
+  <div class="charts" id="frontiers"></div>
+  <p class="caveat" id="frontier-caveat"></p>
+
+  <section>
+    <h2 class="sec">What remasking does to accuracy</h2>
+    <p class="sec-lede" id="impact-lede"></p>
+  </section>
+  <div class="impact" id="impact"></div>
+
+  <section>
+    <h2 class="sec">What kind of edit it makes</h2>
+    <p class="sec-lede" id="tax-lede"></p>
+  </section>
+  <div class="chart-card" id="taxonomy"></div>
+
+  <section>
+    <h2 class="sec">What remasking does to answers: examples</h2>
+    <p class="sec-lede">Each example is one task decoded twice at the same δ: once with remasking off and once with it on. The two runs are identical until the first remask edit, which is outlined in <span style="color:var(--rm);font-weight:600">violet</span>. Step through, or jump to the next remask event, where the inspector shows every token Dream re-scored and why one was picked.</p>
+  </section>
+
+  <nav class="picker-wrap" id="picker" aria-label="Examples"></nav>
+  <section class="task-head" id="task-head"></section>
+
+  <div class="transport" role="toolbar" aria-label="Playback">
+    <div class="group">
+      <button class="ctl" id="btn-start" title="First step (Home)" aria-label="First step">⏮</button>
+      <button class="ctl" id="btn-back" title="Previous event (←)" aria-label="Previous event">◀</button>
+      <button class="ctl play" id="btn-play" title="Play or pause (Space)">Play</button>
+      <button class="ctl" id="btn-fwd" title="Next event (→)" aria-label="Next event">▶</button>
+      <button class="ctl" id="btn-end" title="Last step (End)" aria-label="Last step">⏭</button>
+    </div>
+    <div class="scrub">
+      <input type="range" id="scrub" min="0" max="1" value="0" aria-label="Event">
+      <span class="readout" id="readout">0 / 0</span>
+    </div>
+    <div class="group">
+      <span class="group-label" id="lbl-color">Colour</span>
+      <div class="seg" id="seg-color" role="group" aria-labelledby="lbl-color">
+        <button data-v="recency" title="Highlight this step and the two before it">recent</button>
+        <button data-v="order" title="Colour every token by the step it was committed at">commit order</button>
+      </div>
+    </div>
+    <div class="group">
+      <span class="group-label" id="lbl-mask">Masks</span>
+      <div class="seg" id="seg-mask" role="group" aria-labelledby="lbl-mask">
+        <button data-v="ghost" title="Masked slots keep their final width">ghost</button>
+        <button data-v="dots" title="Masked slots as a dot">dots</button>
+      </div>
+    </div>
+    <div class="group">
+      <label class="group-label" for="speed">Speed</label>
+      <select class="ctl" id="speed">
+        <option value="2">2 events/s</option>
+        <option value="4">4 events/s</option>
+        <option value="8" selected>8 events/s</option>
+        <option value="16">16 events/s</option>
+      </select>
+    </div>
+    <button class="ctl jump" id="btn-jump" title="Jump to the next remask event (R)">Next remask ▸</button>
+  </div>
+
+  <div class="legend">
+    <span><span class="sw" style="background:var(--now)">tok</span>committed this step</span>
+    <span><span class="sw" style="background:var(--recent-1)">tok</span><span class="sw" style="background:var(--recent-2)">tok</span>previous two steps</span>
+    <span><span class="sw" style="background:var(--ghost);color:transparent">tok</span>still masked</span>
+    <span><span class="sw" style="box-shadow:inset 0 0 0 1.5px var(--rm);background:var(--rm-soft)">tok</span>replaced by remasking</span>
+    <span><span class="sw" style="text-decoration:underline wavy var(--rm)">tok</span>the token remasking replaces (run without it)</span>
+    <span><span class="sw" style="outline:1px dashed var(--rm)">tok</span>re-scored this pass (bottom 4)</span>
+    <span><span class="sw" style="border-bottom:2px solid var(--err)">tok</span>first position where the two answers differ</span>
+    <span><span class="blk"></span>&nbsp;SDAR block boundary</span>
+    <span><kbd>Space</kbd> <kbd>←</kbd> <kbd>→</kbd> <kbd>Shift</kbd>+arrows ×10 · <kbd>R</kbd> next remask · <kbd>1</kbd> <kbd>2</kbd> panel</span>
+  </div>
+
+  <main class="panels" id="panels"></main>
+  <section class="inspector" id="inspector" aria-live="polite"></section>
+  <section class="final" id="final"></section>
+</div>
+
+<script>
+const DATA = /*__DATA__*/null;
+const $ = (id) => document.getElementById(id);
+const store = {
+  get(k, d) { try { const v = localStorage.getItem("rmd:" + k); return v === null ? d : JSON.parse(v); } catch (e) { return d; } },
+  set(k, v) { try { localStorage.setItem("rmd:" + k, JSON.stringify(v)); } catch (e) {} },
+};
+function esc(s) { return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+function visible(s) { return s.replace(/\n/g, "↵").replace(/ /g, "␣").replace(/\t/g, "⇥"); }
+const fmt = (v, d = 2) => (v === null || v === undefined || Number.isNaN(v) ? "–" : Number(v).toFixed(d));
+
+// ================================================================ header copy
+$("lede").innerHTML = DATA.lede;
+$("frontier-caveat").innerHTML = DATA.frontierCaveat;
+$("impact-lede").innerHTML = DATA.impactLede;
+
+// ================================================================ charts
+const SHAPES = {
+  circle: (x, y, r) => `<circle cx="${x}" cy="${y}" r="${r}"/>`,
+  square: (x, y, r) => `<rect x="${x - r * 0.9}" y="${y - r * 0.9}" width="${r * 1.8}" height="${r * 1.8}" rx="1.5"/>`,
+  triangle: (x, y, r) => `<path d="M${x},${y - r * 1.15}L${x + r * 1.1},${y + r * 0.8}L${x - r * 1.1},${y + r * 0.8}Z"/>`,
+  diamond: (x, y, r) => `<path d="M${x},${y - r * 1.2}L${x + r * 1.1},${y}L${x},${y + r * 1.2}L${x - r * 1.1},${y}Z"/>`,
+};
+function legendKey(s) {
+  const line = s.line ? `<line x1="0" x2="22" y1="6" y2="6" style="stroke:var(${s.css})" stroke-width="2" ${s.dash ? 'stroke-dasharray="4 3"' : ""}/>` : "";
+  return `<span class="key"><svg viewBox="0 0 22 12" aria-hidden="true">${line}<g style="fill:var(${s.css});stroke:var(--panel)" stroke-width="1.2">${SHAPES[s.shape](11, 6, 4)}</g></svg>${esc(s.name)}</span>`;
+}
+// One scale places marks, ticks and labels. x is either log (tokens/s) or categorical (delta).
+function drawChart(card, spec) {
+  const W = 440, H = 290, L = 40, R = 14, T = 12, B = 38;
+  const pts = spec.series.flatMap((s) => s.points);
+  const ys = pts.map((p) => p.y);
+  const yLo = Math.max(0, Math.floor((Math.min(...ys) - 0.06) * 10) / 10);
+  const yHi = Math.min(1, Math.ceil((Math.max(...ys) + 0.06) * 10) / 10);
+  let X, xTicks;
+  if (spec.xType === "log") {
+    const xs = pts.map((p) => p.x);
+    const lo = Math.log10(Math.min(...xs) / 1.35), hi = Math.log10(Math.max(...xs) * 1.35);
+    X = (v) => L + ((Math.log10(v) - lo) / (hi - lo)) * (W - L - R);
+    xTicks = [0.5, 1, 2, 5, 10, 20, 50, 100, 200, 500].filter((v) => Math.log10(v) >= lo && Math.log10(v) <= hi).map((v) => [v, String(v)]);
+  } else {
+    const cats = spec.categories;
+    X = (v) => L + ((cats.indexOf(v) + 0.5) / cats.length) * (W - L - R);
+    xTicks = cats.map((c) => [c, "δ=" + c]);
+  }
+  const Y = (v) => T + (1 - (v - yLo) / (yHi - yLo)) * (H - T - B);
+  let g = "";
+  for (let v = yLo; v <= yHi + 1e-9; v += 0.1) {
+    const y = Y(v);
+    g += `<line x1="${L}" x2="${W - R}" y1="${y}" y2="${y}" style="stroke:var(--grid)" stroke-width="1"/>`;
+    g += `<text x="${L - 6}" y="${y + 3.5}" text-anchor="end">${v.toFixed(1)}</text>`;
+  }
+  for (const [v, label] of xTicks) {
+    const x = X(v);
+    g += `<line x1="${x}" x2="${x}" y1="${T}" y2="${H - B}" style="stroke:var(--grid)" stroke-width="1"/>`;
+    g += `<text x="${x}" y="${H - B + 14}" text-anchor="middle">${esc(label)}</text>`;
+  }
+  g += `<line x1="${L}" x2="${W - R}" y1="${H - B}" y2="${H - B}" style="stroke:var(--rule)" stroke-width="1"/>`;
+  g += `<text class="axis-title" x="${(L + W - R) / 2}" y="${H - 6}" text-anchor="middle">${esc(spec.xTitle)}</text>`;
+  g += `<text class="axis-title" transform="translate(11 ${(T + H - B) / 2}) rotate(-90)" text-anchor="middle">${esc(spec.yTitle)}</text>`;
+  const hits = [];
+  for (const s of spec.series) {
+    const sorted = [...s.points].sort((a, b) => (spec.xType === "log" ? a.x - b.x : spec.categories.indexOf(a.x) - spec.categories.indexOf(b.x)));
+    if (s.line && sorted.length > 1) {
+      g += `<polyline fill="none" style="stroke:var(${s.css})" stroke-width="2" ${s.dash ? 'stroke-dasharray="5 4"' : ""} points="${sorted.map((p) => `${X(p.x)},${Y(p.y)}`).join(" ")}"/>`;
+    }
+    for (const p of sorted) {
+      const x = X(p.x), y = Y(p.y);
+      g += `<g style="fill:var(${s.css});stroke:var(--panel)" stroke-width="2">${SHAPES[s.shape](x, y, 4.6)}</g>`;
+      if (p.label) {
+        const [dx, dy, anchor] = p.labelAt || [0, -9, "middle"];
+        g += `<text class="pt-label" x="${x + dx}" y="${y + dy}" text-anchor="${anchor}">${esc(p.label)}</text>`;
+      }
+      hits.push({ x, y, s, p });
+    }
+  }
+  const svg = `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(spec.aria)}">${g}</svg>`;
+  card.insertAdjacentHTML("beforeend", svg);
+  card.insertAdjacentHTML("beforeend", `<div class="legend-row">${spec.series.map(legendKey).join("")}</div>`);
+  const tip = document.createElement("div");
+  tip.className = "tip"; tip.hidden = true;
+  card.appendChild(tip);
+  const el = card.querySelector("svg.chart");
+  el.addEventListener("mousemove", (ev) => {
+    const box = el.getBoundingClientRect();
+    const mx = ((ev.clientX - box.left) / box.width) * W, my = ((ev.clientY - box.top) / box.height) * H;
+    let best = null, bd = 1e9;
+    for (const h of hits) { const d = Math.hypot(h.x - mx, h.y - my); if (d < bd) { bd = d; best = h; } }
+    if (!best || bd > 18) { tip.hidden = true; return; }
+    tip.innerHTML = `<div class="tt">${esc(best.s.name)}</div>` + best.p.tip.map(([k, v]) => `<div class="tv">${esc(k)}: ${esc(v)}</div>`).join("");
+    tip.hidden = false;
+    const cb = card.getBoundingClientRect();
+    let left = ev.clientX - cb.left + 12, top = ev.clientY - cb.top + 12;
+    if (left + tip.offsetWidth > cb.width - 4) left = ev.clientX - cb.left - tip.offsetWidth - 12;
+    tip.style.left = left + "px"; tip.style.top = top + "px";
+  });
+  el.addEventListener("mouseleave", () => { tip.hidden = true; });
+}
+for (const f of DATA.frontiers) {
+  const card = document.createElement("div");
+  card.className = "chart-card";
+  card.innerHTML = `<h3>${esc(f.label)}<span class="metric">${esc(f.metric)}</span></h3>`;
+  drawChart(card, { xType: "log", series: f.series, xTitle: "output tokens / second (log scale)", yTitle: f.metric, aria: `${f.label}: ${f.metric} against output tokens per second` });
+  const rows = f.series.flatMap((s) => s.points.map((p) => `<tr><td>${esc(s.name)}</td><td>${esc(p.method)}</td><td class="num">${fmt(p.y)}</td><td class="num">${fmt(p.x, 1)}</td><td class="num">${fmt(p.sec, 1)}</td></tr>`)).join("");
+  card.insertAdjacentHTML("beforeend", `<details class="tableview"><summary>Table</summary><div class="tbl-wrap"><table class="data"><thead><tr><th>series</th><th>setting</th><th>${esc(f.metric)}</th><th>tok/s</th><th>s/task</th></tr></thead><tbody>${rows}</tbody></table></div></details>`);
+  $("frontiers").appendChild(card);
+}
+for (const im of DATA.impact) {
+  const card = document.createElement("div");
+  card.className = "chart-card";
+  card.innerHTML = `<h3>${esc(im.label)}<span class="metric">${esc(im.metric)}</span></h3>`;
+  drawChart(card, { xType: "cat", categories: im.categories, series: im.series, xTitle: "δ", yTitle: im.metric, aria: `${im.label}: accuracy with and without remasking by delta` });
+  const rows = im.rows.map((r) => {
+    const d = r.with - r.without;
+    const cls = d > 0 ? "pos" : d < 0 ? "neg" : "";
+    const sig = r.p < 0.05 ? `<span class="sig">p=${r.p.toFixed(3)}</span>` : "";
+    return `<tr><td>δ=${esc(r.delta)}</td><td class="num">${fmt(r.without)}</td><td class="num">${fmt(r.with)}</td><td class="num ${cls}">${d > 0 ? "+" : ""}${fmt(d)}${sig}</td>`
+      + `<td class="num pos">${r.fixed}</td><td class="num neg">${r.broke}</td><td class="num">${r.changed}</td><td class="num">${fmt(r.editsPerTask, 1)}</td>`
+      + `<td class="num">${fmt(r.tokWithout, 0)} → ${fmt(r.tokWith, 0)}</td><td class="num">${r.synWithout} → ${r.synWith}</td></tr>`;
+  }).join("");
+  card.insertAdjacentHTML("beforeend", `<div class="tbl-wrap"><table class="data"><thead><tr><th></th><th>off</th><th>on</th><th>Δ</th><th title="wrong without remasking, right with it">fixed</th><th title="right without remasking, wrong with it">broke</th><th title="tasks whose answer text changed">text changed</th><th title="remask edits per task">edits</th><th title="mean output tokens, off → on">tokens</th><th title="syntax errors, off → on">syntax err.</th></tr></thead><tbody>${rows}</tbody></table></div>`);
+  $("impact").appendChild(card);
+}
+
+// ================================================================ edit taxonomy
+$("tax-lede").innerHTML = DATA.taxonomy.lede;
+{
+  const t = DATA.taxonomy;
+  const rows = t.rows.map((r) => `<tr><td>${esc(r.kind)}</td><td class="num">${r.count}</td><td class="num">${(r.share * 100).toFixed(0)}%</td>`
+    + `<td style="width:34%"><span style="display:block;height:9px;border-radius:2px;background:var(${r.css});width:${(r.share * 100).toFixed(1)}%"></span></td>`
+    + `<td class="tok" style="text-align:left;font-family:var(--mono);font-size:11.5px">${esc(r.examples)}</td></tr>`).join("");
+  $("taxonomy").innerHTML = `<h3>Remask edits by kind<span class="metric">${t.edits} edits in ${t.tasks} traced tasks</span></h3>`
+    + `<div class="tbl-wrap"><table class="data"><thead><tr><th>kind</th><th>edits</th><th>share</th><th></th><th style="text-align:left">examples (old → new @ position)</th></tr></thead><tbody>${rows}</tbody></table></div>`
+    + `<p class="caveat">${t.note}</p>`;
+}
+
+// ================================================================ player
+const state = { task: Math.min(store.get("task", 0), DATA.examples.length - 1), color: store.get("color", "recency"), mask: store.get("mask", "ghost"), focus: 1, g: 0, playing: false, speed: 8 };
+const task = () => DATA.examples[state.task];
+
+for (const ex of DATA.examples) {
+  for (const arm of ex.arms) {
+    // stepOf[frame] = number of denoising steps applied once `frame` has run
+    let steps = 0;
+    arm.stepOf = arm.frames.map((f) => (f.t === "s" ? ++steps : steps));
+    arm.rmSet = new Set(arm.rmMarks);
+    arm.xSet = new Set(arm.xMarks);
+  }
+}
+function applied(arm, g) { return arm.applied[Math.min(g, arm.applied.length - 1)]; }
+function tokenAt(arm, pos, a) {
+  // the latest version committed by frames [0, a)
+  const h = arm.hist[pos];
+  let out = null;
+  for (const [f, tokIdx] of h) { if (f < a) out = [f, tokIdx]; else break; }
+  return out;
+}
+function tokenText(arm, idx) {
+  const [s, special] = arm.pool[idx];
+  if (special) return s.replace(/<\|(.*?)\|>/g, "$1");
+  return s.includes("\n") ? s.replace(/\n/g, "↵\n") : s;
+}
+
+function renderPicker() {
+  const nav = $("picker");
+  nav.innerHTML = "";
+  const byCat = new Map();
+  DATA.examples.forEach((t, i) => { if (!byCat.has(t.category)) byCat.set(t.category, []); byCat.get(t.category).push([t, i]); });
+  for (const items of byCat.values()) {
+    const cat = document.createElement("div");
+    cat.className = "cat";
+    cat.innerHTML = `<div class="cat-label">${esc(items[0][0].categoryLabel)}</div><div class="picker"></div>`;
+    const grid = cat.querySelector(".picker");
+    const byBench = new Map();
+    for (const [t, i] of items) { if (!byBench.has(t.benchLabel)) byBench.set(t.benchLabel, []); byBench.get(t.benchLabel).push([t, i]); }
+    for (const [bench, list] of byBench) {
+      const col = document.createElement("div");
+      col.className = "bench";
+      col.innerHTML = `<div class="bench-label">${esc(bench)}</div>`;
+      for (const [t, i] of list) {
+        const b = document.createElement("button");
+        b.className = "task-btn";
+        b.setAttribute("aria-pressed", String(i === state.task));
+        b.innerHTML = `<span class="tid">${esc(t.id)} · δ=${esc(t.delta)}</span><span class="tnote">${esc(t.short)}</span>`;
+        b.title = t.note;
+        b.addEventListener("click", () => selectTask(i));
+        col.appendChild(b);
+      }
+      grid.appendChild(col);
+    }
+    nav.appendChild(cat);
+  }
+}
+
+const panelEls = [];
+function renderTask() {
+  const t = task();
+  $("task-head").innerHTML = `<h2>${esc(t.benchLabel)} · ${esc(t.id)} · δ=${esc(t.delta)}</h2>
+    <span class="cat-chip">${esc(t.categoryLabel)}</span>
+    <span class="note">${esc(t.note)}</span>
+    <details class="prompt"><summary>Prompt</summary><pre>${esc(t.prompt)}</pre></details>`;
+  const root = $("panels");
+  root.innerHTML = "";
+  panelEls.length = 0;
+  const peak = Math.max(1, ...t.arms.flatMap((a) => a.frames.filter((f) => f.t === "s").map((f) => f.p.length)));
+  t.arms.forEach((arm, ai) => {
+    const el = document.createElement("section");
+    el.className = "panel";
+    const verdict = arm.correct ? `<span class="chip ok">correct</span>` : `<span class="chip bad">incorrect${arm.failure ? " · " + esc(arm.failure.replace(/_/g, " ")) : ""}</span>`;
+    el.innerHTML = `
+      <div class="p-head" tabindex="0" role="button" aria-label="Inspect ${esc(arm.title)}">
+        <div class="p-title"><span class="swatch" style="background:var(${arm.css})"></span><strong>${esc(arm.title)}</strong>${verdict}</div>
+        <div class="p-sub">${esc(arm.subtitle)} · ${arm.steps} steps${arm.remaskEvents ? ` · ${arm.remaskEvents} remask passes, ${arm.edits} edit${arm.edits === 1 ? "" : "s"}` : ""} · ${arm.stop === null ? "no stop token" : `stops at ${arm.stop} (${esc(arm.stopToken)})`}</div>
+        <div class="p-stat"><span class="st"></span><span class="nw"></span></div>
+      </div>
+      <svg class="strip" preserveAspectRatio="none" role="img" aria-label="Tokens committed per step"></svg>
+      <div class="canvas-box"><pre class="canvas"></pre></div>`;
+    const pre = el.querySelector(".canvas");
+    const spans = [];
+    const frag = document.createDocumentFragment();
+    for (let pos = 0; pos < arm.hist.length; pos++) {
+      if (arm.block && pos > 0 && (pos + arm.promptLen) % arm.block === 0) {
+        const b = document.createElement("span");
+        b.className = "blk"; b.title = `block ${(pos + arm.promptLen) / arm.block} starts`;
+        frag.appendChild(b);
+      }
+      const sp = document.createElement("span");
+      sp.dataset.pos = pos;
+      spans.push(sp);
+      frag.appendChild(sp);
+    }
+    pre.appendChild(frag);
+    pre.addEventListener("click", (ev) => {
+      const sp = ev.target.closest(".t");
+      if (!sp) return;
+      const pos = +sp.dataset.pos, first = arm.hist[pos][0];
+      if (!first) return;
+      state.focus = ai;
+      setG(arm.applied.findIndex((a) => a > first[0]));
+    });
+    const head = el.querySelector(".p-head");
+    head.addEventListener("click", () => { state.focus = ai; update(); });
+    head.addEventListener("keydown", (ev) => { if (ev.key === "Enter") { state.focus = ai; update(); } });
+    const svg = el.querySelector(".strip");
+    const n = Math.max(arm.frames.length, 1), H = 34;
+    svg.setAttribute("viewBox", `0 0 ${n} ${H}`);
+    let bars = "";
+    arm.frames.forEach((f, i) => {
+      if (f.t === "r") { bars += `<rect x="${i + 0.1}" y="0" width="0.8" height="${H}" style="fill:var(--rm)" opacity="${f.chosen === null ? 0.25 : 0.8}"/>`; return; }
+      const h = f.p.length ? 3 + (H - 5) * Math.sqrt(f.p.length / peak) : 0;
+      bars += `<rect x="${i + 0.1}" y="${H - h}" width="0.8" height="${h}" style="fill:var(${arm.css})"/>`;
+    });
+    bars += `<rect class="cursor" x="0" y="0" width="${Math.max(n / 300, 0.35)}" height="${H}" style="fill:var(--ink)"/>`;
+    svg.innerHTML = bars;
+    svg.addEventListener("click", (ev) => {
+      const box = svg.getBoundingClientRect();
+      const f = Math.floor(((ev.clientX - box.left) / box.width) * n);
+      state.focus = ai;
+      setG(Math.max(0, arm.applied.findIndex((a) => a > f)));
+    });
+    root.appendChild(el);
+    panelEls.push({ el, spans, svg, box: el.querySelector(".canvas-box"), st: el.querySelector(".st"), nw: el.querySelector(".nw") });
+  });
+  $("panels").classList.toggle("dots", state.mask === "dots");
+  $("scrub").max = t.G;
+  $("final").innerHTML = t.arms.map((a) => `<div><h4>${esc(a.title)} · final answer (${a.outTokens} tokens)</h4><pre>${esc(a.completion)}</pre></div>`).join("");
+}
+
+function heatScale() {
+  const dark = matchMedia("(prefers-color-scheme: dark)").matches && document.documentElement.dataset.theme !== "light" || document.documentElement.dataset.theme === "dark";
+  return (frac) => `hsl(${(52 + frac * 208).toFixed(0)} ${dark ? "55%" : "78%"} ${dark ? "30%" : "82%"})`;
+}
+
+function update(follow = false) {
+  const t = task();
+  state.g = Math.max(0, Math.min(state.g, t.G));
+  $("scrub").value = state.g;
+  $("readout").textContent = `${state.g} / ${t.G} · ${t.gLabels[state.g]}`;
+  $("btn-play").textContent = state.playing ? "Pause" : "Play";
+  t.arms.forEach((arm, ai) => {
+    const P = panelEls[ai];
+    const a = applied(arm, state.g);
+    const cur = a > 0 ? arm.frames[a - 1] : null;
+    const curStep = a > 0 ? arm.stepOf[a - 1] : 0;
+    P.el.classList.toggle("focus", ai === state.focus);
+    const heat = state.color === "order" ? heatScale() : null;
+    const rmPass = cur && cur.t === "r" ? cur : null;
+    const checked = rmPass ? new Set(rmPass.bottom) : null;
+    let newest = null;
+    for (let pos = 0; pos < P.spans.length; pos++) {
+      const sp = P.spans[pos];
+      const got = tokenAt(arm, pos, a);
+      const finalIdx = arm.hist[pos].length ? arm.hist[pos][arm.hist[pos].length - 1][1] : null;
+      const idx = got ? got[1] : finalIdx;
+      const text = idx === null ? " " : tokenText(arm, idx);
+      if (sp.textContent !== text) sp.textContent = text;
+      let cls = "t";
+      if (idx !== null && arm.pool[idx][1]) cls += " sp";
+      if (text.includes("\n")) cls += " nl";
+      if (pos === t.divergence) cls += " div";
+      if (!got) { cls += " m"; sp.style.background = ""; }
+      else {
+        const f = got[0], age = curStep - arm.stepOf[f];
+        const edited = arm.frames[f].t === "r";
+        if (edited) cls += " rm";
+        else if (arm.xSet.has(pos)) cls += " rmx";
+        if (heat && !edited) { sp.style.background = heat(arm.steps > 1 ? (arm.stepOf[f] - 1) / (arm.steps - 1) : 0); }
+        else sp.style.background = "";
+        if (f === a - 1) { if (!edited) cls += " now"; newest = newest || sp; }
+        else if (!heat && !edited && age === 1) cls += " r1";
+        else if (!heat && !edited && age === 2) cls += " r2";
+        if (checked && checked.has(pos)) cls += rmPass.chosen === pos ? " pick" : " chk";
+      }
+      if (sp.className !== cls) sp.className = cls;
+      sp.title = `position ${pos}` + (got ? ` · ${visible(arm.pool[got[1]][0])}` : " · masked");
+    }
+    const done = arm.hist.every((h, pos) => h.length === 0 || tokenAt(arm, pos, a));
+    P.st.innerHTML = `step ${curStep} / ${arm.steps}` + (done && a >= arm.frames.length ? ` · <span class="done">answer complete</span>` : "");
+    P.nw.innerHTML = !cur ? "not started" : cur.t === "r"
+      ? `<span class="rmnow">remask pass · ${cur.chosen === null ? "no edit" : "1 edit"}</span>`
+      : `+${cur.p.length} tokens`;
+    P.svg.querySelector(".cursor").setAttribute("x", Math.max(0, a - 1));
+    if (follow && newest) {
+      const top = newest.offsetTop, box = P.box;
+      if (top < box.scrollTop + 20 || top > box.scrollTop + box.clientHeight - 30) box.scrollTop = top - box.clientHeight / 2;
+    }
+  });
+  renderInspector();
+  store.set("task", state.task); store.set("color", state.color); store.set("mask", state.mask);
+  for (const [id, key] of [["seg-color", "color"], ["seg-mask", "mask"]]) {
+    $(id).querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.v === state[key])));
+  }
+}
+
+function renderInspector() {
+  const t = task();
+  const arm = t.arms[state.focus];
+  const a = applied(arm, state.g);
+  const el = $("inspector");
+  if (a === 0) {
+    el.innerHTML = `<div class="i-head"><h3>${esc(arm.title)}</h3><span class="meta">before step 1</span></div><p class="why">Nothing is committed yet. Press <b>Play</b>, <b>→</b>, or <b>Next remask ▸</b>.</p>`;
+    return;
+  }
+  const f = arm.frames[a - 1];
+  if (f.t === "r") { el.innerHTML = remaskInspector(arm, f); return; }
+  const chips = f.p.map((pos) => `<span class="commit"><span class="pos">${pos}</span> ${esc(visible(arm.pool[f.tok[f.p.indexOf(pos)]][0]))}</span>`).join("");
+  let why;
+  if (f.n) {
+    const [npos, ntok, nerr] = f.n;
+    why = `Accepted a prefix of <b>${f.k}</b> of <b>${f.c}</b> SDAR candidates (confidence order). Stopped before candidate ${f.k + 1}, <code>${esc(visible(ntok))}</code> at position ${npos}` + (nerr === null ? "." : `, whose Dream prefix error is <b>${nerr.toFixed(3)}</b> nats &gt; τ = ${t.tau.toFixed(3)}.`);
+  } else {
+    why = `Accepted all <b>${f.k}</b> remaining candidates in the block: every prefix error stayed under τ = ${t.tau.toFixed(3)}.`;
+  }
+  el.innerHTML = `<div class="i-head"><h3>${esc(arm.title)}</h3><span class="meta">step ${arm.stepOf[a - 1]} of ${arm.steps} · block ${f.b} · ${f.p.length} committed</span></div>
+    <div class="i-body"><div><h4>Tokens committed at this step (position · token)</h4><div class="commits">${chips}</div><p class="why">${why}</p></div>
+    <div>${f.e.length ? errChart(f, t.tau, t.delta) : "<h4>Verifier</h4><p class='why'>No prefix was scored.</p>"}</div></div>`;
+}
+
+function remaskInspector(arm, f) {
+  const rows = f.rows.map((r) => {
+    const [pos, tok, lp, arg, commitLp, inBottom, survivor, weight] = r;
+    const cls = f.chosen === pos ? "chosen" : inBottom ? "bottom" : "";
+    return `<tr class="${cls}"><td>${pos}</td><td class="tok">${esc(visible(tok))}</td><td>${Math.exp(lp).toFixed(3)}</td><td>${commitLp === null ? "–" : Math.exp(commitLp).toFixed(3)}</td><td class="tok">${esc(visible(arg))}</td><td>${inBottom ? "✓" : ""}</td><td>${survivor ? "✓" : ""}</td><td>${weight === null ? "" : (weight * 100).toFixed(0) + "%"}</td></tr>`;
+  }).join("");
+  const more = f.total > f.rows.length ? `<p class="why">Showing the ${f.rows.length} least probable of ${f.total} re-scored tokens; the rest are all above ${Math.exp(f.rows[f.rows.length - 1][2]).toFixed(3)}.</p>` : "";
+  const outcome = f.chosen === null
+    ? `<b>No edit.</b> None of the 4 least probable tokens would change: Dream's top choice at each already matches the committed token${f.survivors === 0 ? "" : ""}.`
+    : `<b>Replaced</b> <code>${esc(visible(f.old))}</code> with Dream's top choice <code>${esc(visible(f.new))}</code> at position ${f.chosen}, drawn with weight ${(f.chosenWeight * 100).toFixed(0)}% (1/p over the ${f.survivors} candidate${f.survivors === 1 ? "" : "s"} Dream would change).`;
+  return `<div class="i-head"><h3>${esc(arm.title)} · remask pass</h3><span class="meta">after step ${f.s + 1} · block ${f.b} · trigger: ${f.trigger === "stop" ? "stop token reached" : "block complete"} · ${f.total} tokens re-scored with that one token masked</span></div>
+    <p class="why">${outcome}</p>
+    <div class="tbl-wrap"><table class="rmtab"><thead><tr><th>pos</th><th style="text-align:left">token</th><th title="Dream's probability of the committed token with it masked and everything else visible">p now</th><th title="Dream's probability of this token when it was committed">p at commit</th><th style="text-align:left">Dream's top</th><th>bottom 4</th><th>would change</th><th>draw weight</th></tr></thead><tbody>${rows}</tbody></table></div>${more}`;
+}
+
+function errChart(f, tau, delta) {
+  const n = Math.min(f.e.length, 64);
+  const W = 520, H = 170, L = 38, R = 64, T = 10, B = 26;
+  const ymax = Math.max(1.2, ...f.e.slice(0, n));
+  const y = (v) => T + (H - T - B) * (1 - Math.log1p(v) / Math.log1p(ymax));
+  const bw = (W - L - R) / n;
+  let g = "";
+  for (const v of [0, 0.1, 0.5, 1, 5, 25, 100].filter((v) => v <= ymax * 1.01)) {
+    g += `<line x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}" style="stroke:var(--rule)" stroke-width="1"/><text x="${L - 5}" y="${y(v) + 3}" text-anchor="end">${v}</text>`;
+  }
+  for (let j = 0; j < n; j++) {
+    const v = f.e[j], fill = j < f.k ? "var(--ok)" : j === f.k ? "var(--err)" : "var(--bar-pad)", top = y(v);
+    g += `<rect x="${L + j * bw + bw * 0.12}" y="${top}" width="${Math.max(bw * 0.76, 1)}" height="${Math.max(H - B - top, 0.5)}" style="fill:${fill}"><title>prefix ${j + 1}: ${v.toFixed(4)} nats</title></rect>`;
+  }
+  if (tau <= ymax) g += `<line x1="${L}" x2="${W - R}" y1="${y(tau)}" y2="${y(tau)}" stroke-dasharray="4 3" stroke-width="1" style="stroke:var(--ink)"/><text x="${W - R + 4}" y="${y(tau) + 3}" style="fill:var(--ink)">τ δ=${delta}</text>`;
+  const lab = n <= 16 ? 1 : n <= 32 ? 4 : 8;
+  for (let j = 0; j < n; j++) if ((j + 1) % lab === 0 || j === 0) g += `<text x="${L + (j + 0.5) * bw}" y="${H - B + 13}" text-anchor="middle">${j + 1}</text>`;
+  g += `<text x="${(L + W - R) / 2}" y="${H - 2}" text-anchor="middle">prefix length</text>`;
+  return `<h4>Dream prefix error (nats, log scale)</h4><svg class="errchart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Prefix error against the threshold">${g}</svg>`;
+}
+
+function setG(g, follow = true) { state.g = g; update(follow); }
+function step(d) { stop(); setG(state.g + d); }
+let timer = null, acc = 0, lastT = 0;
+function tick(now) {
+  if (!state.playing) return;
+  const dt = lastT ? (now - lastT) / 1000 : 0; lastT = now;
+  acc += dt * state.speed;
+  if (acc >= 1) { const inc = Math.floor(acc); acc -= inc; if (state.g >= task().G) { stop(); return; } setG(Math.min(task().G, state.g + inc)); }
+  timer = requestAnimationFrame(tick);
+}
+function play() { if (state.g >= task().G) state.g = 0; state.playing = true; lastT = 0; acc = 0; timer = requestAnimationFrame(tick); update(); }
+function stop() { state.playing = false; if (timer) cancelAnimationFrame(timer); timer = null; $("btn-play").textContent = "Play"; }
+function nextRemask() {
+  const t = task();
+  const next = t.remaskG.find((g) => g > state.g) ?? t.remaskG[0];
+  if (next === undefined) return;
+  stop(); state.focus = 1; setG(next);
+}
+function selectTask(i) { stop(); state.task = i; state.g = 0; state.focus = 1; renderPicker(); renderTask(); update(); }
+
+$("btn-play").addEventListener("click", () => (state.playing ? stop() : play()));
+$("btn-back").addEventListener("click", () => step(-1));
+$("btn-fwd").addEventListener("click", () => step(1));
+$("btn-start").addEventListener("click", () => { stop(); setG(0); });
+$("btn-end").addEventListener("click", () => { stop(); setG(task().G); });
+$("btn-jump").addEventListener("click", nextRemask);
+$("scrub").addEventListener("input", (ev) => { stop(); setG(+ev.target.value); });
+$("speed").addEventListener("change", (ev) => { state.speed = +ev.target.value; });
+$("seg-color").addEventListener("click", (ev) => { const b = ev.target.closest("button"); if (b) { state.color = b.dataset.v; update(); } });
+$("seg-mask").addEventListener("click", (ev) => { const b = ev.target.closest("button"); if (!b) return; state.mask = b.dataset.v; $("panels").classList.toggle("dots", state.mask === "dots"); update(); });
+document.addEventListener("keydown", (ev) => {
+  if (ev.target.matches("input, select, textarea")) return;
+  if (ev.key === " " && ev.target.closest("button, [role=button], summary")) return;
+  const big = ev.shiftKey ? 10 : 1;
+  if (ev.key === " ") { ev.preventDefault(); state.playing ? stop() : play(); }
+  else if (ev.key === "ArrowRight") { ev.preventDefault(); step(big); }
+  else if (ev.key === "ArrowLeft") { ev.preventDefault(); step(-big); }
+  else if (ev.key === "Home") { ev.preventDefault(); stop(); setG(0); }
+  else if (ev.key === "End") { ev.preventDefault(); stop(); setG(task().G); }
+  else if (ev.key === "r" || ev.key === "R") nextRemask();
+  else if (ev.key === "1" || ev.key === "2") { state.focus = +ev.key - 1; update(); }
+});
+window.matchMedia("(prefers-color-scheme: dark)").addEventListener?.("change", () => update());
+
+renderPicker();
+renderTask();
+// open on the first remask edit, so the page's first frame shows the point of it
+state.g = task().firstEditG ?? 0;
+update(true);
+</script>
