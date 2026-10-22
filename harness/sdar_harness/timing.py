@@ -14,6 +14,20 @@ and only an explicitly profiled run pays anything.
 The totals are wall-clock spans on the stream, so stages that overlap would
 double-count. Nothing here overlaps: the scheduler proposes, then verifies,
 then the block loop commits, strictly in order.
+
+Stages (block samplers; every one is optional and none nests in another):
+  prefill          the prompt's whole blocks into the KV cache (both models)
+  propose_forward  the proposer's model call: body plus output head
+  propose_rank     log-softmax, token choice, confidence sort
+  verify_forward   one verifier model call per group of rows (MI only)
+  verify_test      handing candidates to the verifier, building its probe
+                   rows, the log-ratio prefix test (MI only)
+  decide           writing the accepted tokens into the block
+  stop_check       the early-stop test after each step
+  commit           a finished block's K/V into the cache (both models)
+  remask           the remask pass (xadaptive-remask only)
+What no stage covers -- the Python loop -- is the summary's "residual". The
+SDAR-only adaptive sampler still times its verifier as one "verifier" stage.
 """
 
 from __future__ import annotations
@@ -63,11 +77,15 @@ class StageTimer:
         self._counts: dict[str, int] = {}
 
     @contextmanager
-    def __call__(self, stage: str) -> Iterator[None]:
+    def __call__(self, stage: str, count: bool = True) -> Iterator[None]:
+        """Time one span of `stage`. `count=False` adds the time without
+        counting a call, for a stage timed in pieces (the proposer's forward
+        and its output head) that is still one call."""
         if not self.enabled:
             yield
             return
-        self._counts[stage] = self._counts.get(stage, 0) + 1
+        if count:
+            self._counts[stage] = self._counts.get(stage, 0) + 1
         if self._cuda:
             start = torch.cuda.Event(enable_timing=True)
             end = torch.cuda.Event(enable_timing=True)

@@ -26,14 +26,19 @@ sdar_harness/
                   adaptive (same-model MI ratio) commitment, stop set, early stop
   cross.py        cross-model MI decoding: one model proposes, the other verifies (+ remask)
   vgb.py          density-ratio VGB walk (exp06 Track A/B)
-  scoring.py      gsm8k / math_500 answer extraction; code sanitizing for evalplus
+  scoring.py      grading dispatch: OpenCompass-protocol records vs legacy ones
+  opencompass.py  SDAR's OpenCompass prompts, extractors and graders, ported verbatim
   io.py, timing.py
 scripts/
   run_benchmark.py      the runner: --methods fixed:k | dynamic:θ | adaptive:δ | xadaptive[-remask]:δ | vgb:…
   score_evalplus.py     executes MBPP+ / HumanEval+ records with EvalPlus
   summarize_results.py  per-arm summary.csv / summary.json
+  rescore_math.py       re-grades finished MATH-500 records with the current scorer (math_verify)
+  score_opencompass.py  SDAR's code grading: HumanEval base tests, sanitized MBPP 3 asserts
+  extend_canvas.py      sets aside the tasks a longer canvas can change, for a resumed rerun
+  prepare_opencompass.py  builds ../data/opencompass/ (SDAR's four benchmarks, its prompts)
   pack_work.py, preflight.py, prepare_sdar_local.py (builds ../models/*-local)
-tests/            147 tests, CPU only except one 2-card shard test (skipped without 2 GPUs)
+tests/            160 tests, CPU only except one 2-card shard test (skipped without 2 GPUs)
 vendor_env/tf452  transformers 4.52.4 overlay SDAR needs (gitignored; exp04/05 symlink here)
 ```
 
@@ -45,7 +50,12 @@ are identical, so `ModelOptions` reads the block from the checkpoint name
 (`trained_block_length`) and refuses any other `--block-length`. The family
 default is 64, so a b4 checkpoint needs `--block-length 4`.
 `--allow-block-mismatch` is for out-of-distribution ablations only. Changes
-after the move (2026-10-01): the `dynamic:θ` arm and this guard.
+after the move (2026-10-01): the `dynamic:θ` arm and this guard. 2026-10-03:
+MATH-500 is graded with math_verify as SDAR's OpenCompass config does
+(`math-verify[antlr4_9_3]`, see requirements.txt); `early_eos` is gone; a
+resumed run refuses records made with a different recipe (`RESUME_KEYS`); and
+`xadaptive` skips the verifier forward when one candidate is left and veto is
+off (that candidate is always accepted, so outputs are unchanged).
 
 ## Using it from an experiment
 
@@ -63,5 +73,5 @@ Experiment-specific analysis scripts stay in the experiment and add
 ## Checks
 
 ```bash
-cd harness && PYTHONPATH=vendor_env/tf452:. python -m pytest -q   # 147 passed, ~5 min
+cd harness && PYTHONPATH=vendor_env/tf452:. python -m pytest -q   # 159 passed + 1 skipped without 2 GPUs, ~4 min
 ```

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # B=4 quality anchors: SDAR's published block-4 checkpoints (SDAR-1.7B-Chat,
-# SDAR-8B-Chat) decoded at B=4, on the full test sets of GSM8K (1,319),
-# MATH-500 (500), MBPP+ (378) and HumanEval+ (164).
+# SDAR-8B-Chat) decoded at B=4 under SDAR's own OpenCompass protocol, on
+# GSM8K (1,319), MATH-500 (500), HumanEval (164) and sanitized MBPP (257).
 #
 #   fixed:1        static, 1 token/step: the paper's Table 2 setting, the quality target
 #   fixed:2, :4    static, 2 / 4 tokens per step (4 = one whole block per step)
@@ -15,12 +15,12 @@
 #
 #   bash launch_b4_quality.sh                       # 1.7B on card 1, 8B on cards 2,3
 #   SMALL_CARD=0 BIG_PAIR=2,3 bash launch_b4_quality.sh
-#   TASKS=100 bash launch_b4_quality.sh             # exp04-06's 100-task samples instead
+#   TASKS=100 BENCHMARKS="gsm8k math_500 mbpp_plus humaneval_plus" bash launch_b4_quality.sh   # legacy exp04-06 samples and prompts
 #   ONLY=8b bash launch_b4_quality.sh               # one model only (1p7b | 8b)
 #   DRY_RUN=1 bash launch_b4_quality.sh
 #
-# Outputs: outputs/baselines/SDAR-{1.7B,8B}-Chat/<bench>/<method>/, logs under
-# logs/baselines/. Resumable: rerunning skips finished tasks.
+# Outputs: outputs/opencompass/SDAR-{1.7B,8B}-Chat/<bench>/<method>/, logs under
+# logs/opencompass/. Resumable: rerunning skips finished tasks.
 set -euo pipefail
 
 PROJECT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -32,8 +32,8 @@ SMALL_CARD="${SMALL_CARD:-1}"
 BIG_PAIR="${BIG_PAIR:-2,3}"
 ONLY="${ONLY:-both}"
 export TASKS="${TASKS:-all}"
-export BENCHMARKS="${BENCHMARKS:-gsm8k math_500 mbpp_plus humaneval_plus}"
-export METHODS="fixed:1 fixed:2 fixed:4 dynamic:0.95 dynamic:0.90"
+export BENCHMARKS="${BENCHMARKS:-gsm8k math_500 humaneval mbpp_sanitized}"
+export METHODS="${METHODS:-fixed:1 fixed:2 fixed:4 dynamic:0.95 dynamic:0.90}"
 
 SMALL_MODEL="$MODELS_DIR/SDAR-1.7B-Chat-local"
 BIG_MODEL="$MODELS_DIR/SDAR-8B-Chat-local"

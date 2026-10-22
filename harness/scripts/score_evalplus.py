@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Score one generated code method with EvalPlus (MBPP+ or HumanEval+).
 
+`score` is the base tests (the peer papers' convention); plus is in `plus_test_pass`.
+For HumanEval, score_opencompass.py then replaces `score` with SDAR's grading.
+
 Generalized from the previous experiment's score_mbpp_plus.py, which hardcoded
 the mbpp dataset and its loader.
 """
@@ -103,24 +106,27 @@ def main() -> None:
         detail = by_task[task_id]
         base_pass = detail["base_status"] == PASS
         plus_pass = base_pass and detail["plus_status"] == PASS
-        if plus_pass:
-            failure = None
-            execution_category = None
-        elif not bool(row.get("syntax_valid")):
+        # `score` is the base tests since 2026-10-03: the peer papers all grade
+        # code on base tests. `failure_type` follows `score`; a plus-only miss
+        # shows in `plus_test_pass` and `execution_failure_category`.
+        if not bool(row.get("syntax_valid")) and not base_pass:
             execution_category = "syntax_error"
             failure = "syntax_error"
-        elif detail["base_status"] == "timeout" or detail["plus_status"] == "timeout":
+        elif detail["base_status"] == "timeout":
             execution_category = "timeout"
             failure = "timeout"
         elif not base_pass:
             execution_category = "wrong_answer_or_runtime_error"
             failure = f"base_{detail['base_status']}"
-        else:
+        elif not plus_pass:
             execution_category = "plus_wrong_answer_or_runtime_error"
-            failure = f"plus_{detail['plus_status']}"
+            failure = None
+        else:
+            execution_category = None
+            failure = None
         row.update(
             {
-                "score": plus_pass,
+                "score": base_pass,
                 "failure_type": failure,
                 "base_test_pass": base_pass,
                 "plus_test_pass": plus_pass,
@@ -132,8 +138,9 @@ def main() -> None:
         scored.append(row)
     write_jsonl(args.method_dir / "records.scored.jsonl", scored)
     print(
-        f"{args.benchmark} subset pass@1 ({len(scored)} generated tasks): "
-        f"{sum(row['score'] for row in scored) / len(scored):.4f}"
+        f"{args.benchmark} pass@1 ({len(scored)} generated tasks): "
+        f"base {sum(row['base_test_pass'] for row in scored) / len(scored):.4f}, "
+        f"plus {sum(row['plus_test_pass'] for row in scored) / len(scored):.4f}"
     )
 
 

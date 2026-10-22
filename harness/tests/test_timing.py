@@ -72,7 +72,8 @@ def test_profiling_does_not_change_what_the_sampler_produces() -> None:
     assert timed.continuation_token_ids == plain.continuation_token_ids
     assert timed.denoising_steps == plain.denoising_steps
     assert plain.stage_seconds == {}
-    assert set(timed.stage_seconds) == {"proposer", "commit"}
+    assert set(timed.stage_seconds) == {
+        "prefill", "propose_forward", "propose_rank", "decide", "stop_check", "commit"}
 
 
 def test_adaptive_profiling_separates_proposer_from_verifier() -> None:
@@ -86,7 +87,8 @@ def test_adaptive_profiling_separates_proposer_from_verifier() -> None:
     result = generate_blockwise(
         provider, prompt, config, timer=StageTimer(torch.device("cpu"), enabled=True)
     )
-    assert set(result.stage_seconds) == {"proposer", "verifier", "commit"}
+    assert set(result.stage_seconds) == {
+        "prefill", "propose_forward", "propose_rank", "verifier", "decide", "stop_check", "commit"}
 
 
 def test_every_block_run_records_its_prefill_inside_the_timed_run() -> None:
@@ -120,3 +122,33 @@ def test_span_clock_reads_cuda_events_without_syncing_inside_the_span() -> None:
     torch.ones(256, 256, device=device) @ torch.ones(256, 256, device=device)
     clock.stop()
     assert clock.seconds() > 0
+
+
+def test_an_uncounted_span_adds_time_but_not_a_call() -> None:
+    timer = StageTimer(torch.device("cpu"), enabled=True)
+    with timer("propose_forward"):
+        pass
+    with timer("propose_forward", count=False):
+        pass
+    assert timer.counts() == {"propose_forward": 1}
+    assert set(timer.totals()) == {"propose_forward"}
+
+
+def test_block_stages_are_named_apart_and_counted_once_per_call() -> None:
+    _, provider = build(block_length=4)
+    prompt = torch.arange(8, dtype=torch.long).unsqueeze(0) % 5
+    for method, knob in (("fixed", {"fixed_k": 2}), ("dynamic", {"threshold": 0.5})):
+        config = GenerationConfig(
+            method=method, continuation_length=8, max_candidates=4,
+            verifier_microbatch_size=2, **knob,
+        )
+        result = generate_blockwise(
+            provider, prompt, config, timer=StageTimer(torch.device("cpu"), enabled=True)
+        )
+        counts = result.stage_counts
+        assert set(result.stage_seconds) == set(counts)
+        # The prompt is two whole blocks: one prefill, never counted as a commit.
+        assert counts["prefill"] == 1
+        assert counts["commit"] == result.commit_passes - 1
+        for stage in ("propose_forward", "propose_rank", "decide", "stop_check"):
+            assert counts[stage] == result.denoising_steps, (method, stage)

@@ -7,21 +7,30 @@
 #                (B=4, k=1 is the published Table 2 setting). k <= block.
 #   dynamic:θ    SDAR's low_confidence_dynamic: every token with p > θ, at least 1
 #
-# Recipe: greedy T=0, logp confidence, max_candidates = block, full test sets
-# (TASKS=N samples N per benchmark with seed 271828 instead), canvases GSM8K 512
-# / HumanEval+ 768 / MBPP+ 512 / MATH-500 2048, early stop at the first settled
-# stop token, logits over IDs < 151665, bf16, 3 untimed warmups and one timed
-# repeat per task. It is NOT SDAR's OpenCompass protocol (../harness/AUDIT.md).
+# Protocol: SDAR's OpenCompass eval config (eval_sdar_hf.py), since 2026-10-03.
+# GSM8K (1,319), MATH-500, HumanEval (164) and sanitized MBPP (257) with its
+# prompts (../data/opencompass/) and graders (math_verify, MATHEvaluator v2,
+# human-eval / MBPP base tests), a 4096-token canvas, fp16, the whole
+# vocabulary. Ours on top: greedy T=0 (= its top_k=1), logp confidence,
+# max_candidates = block, early stop at the first settled stop token (same
+# output), 3 untimed warmups and one timed repeat per task. TASKS=N samples N
+# per benchmark with seed 271828. ../harness/AUDIT.md lists what still differs.
 #
 #   bash launch_baselines.sh                                         # 1.7B-b64 on card 0
 #   MODEL=../models/SDAR-1.7B-Chat-local bash launch_baselines.sh   # b4: fixed:1,2,4 + dynamic
 #   MODEL=../models/SDAR-8B-Chat-b64-local CARDS=0,1 bash launch_baselines.sh
 #   TASKS=200 bash launch_baselines.sh                               # screening subset
-#   TASKS=100 bash launch_baselines.sh                               # exp04-06's 100 tasks (../data/sample100)
+#   TASKS=250 bash launch_baselines.sh                               # dev sets: GSM8K/MATH 250 (../data/sample250), HE/MBPP all
+#   TASKS=100 BENCHMARKS="gsm8k math_500 mbpp_plus humaneval_plus" bash launch_baselines.sh   # legacy exp04-06 samples and prompts
 #   TASKS=3 OUTPUT_ROOT=outputs/smoke LOG_ROOT=logs/smoke bash launch_baselines.sh
 #   DRY_RUN=1 bash launch_baselines.sh
+#   WAIT_FOR_CARDS=1 bash launch_baselines.sh                        # wait out other users' jobs instead of refusing
 #
-# A single card loads the model whole; two cards pipeline-split it (8B in bf16
+# Contention: the runner waits before each timed run until no other process
+# holds our cards, samples them while it is timed, and redoes a run that shared
+# them (../harness/sdar_harness/contention.py; --contention-guard off disables it).
+#
+# A single card loads the model whole; two cards pipeline-split it (8B in fp16
 # does not fit one 16 GB A4000). Resumable: rerunning skips finished tasks.
 set -euo pipefail
 
@@ -37,12 +46,15 @@ MODEL="${MODEL:-$PROJECT_DIR/../models/SDAR-1.7B-Chat-b64-local}"
 CARDS="${CARDS:-0}"
 TASKS="${TASKS:-all}"
 SEED="${SEED:-271828}"
-BENCHMARKS="${BENCHMARKS:-gsm8k math_500 mbpp_plus humaneval_plus}"
+BENCHMARKS="${BENCHMARKS:-gsm8k math_500 humaneval mbpp_sanitized}"
 DATA_ROOT="${DATA_ROOT:-$PROJECT_DIR/../data}"
 SDAR_OVERLAY="${SDAR_OVERLAY:-$HARNESS_DIR/vendor_env/tf452}"
 EVALPLUS_WORKERS="${EVALPLUS_WORKERS:-4}"
 MICROBATCH=4
-VOCAB_LIMIT=151665
+# SDAR's eval config: fp16 weights, logits over the whole vocabulary (151936
+# = the lm_head width, so the limit is a no-op; only the mask token is barred).
+DTYPE="${DTYPE:-float16}"
+VOCAB_LIMIT=151936
 
 [ -d "$MODEL" ] || { echo "ERROR: no checkpoint at $MODEL (build it with $HARNESS_DIR/scripts/prepare_sdar_local.py)" >&2; exit 2; }
 MODEL_NAME="$(basename -- "$MODEL")"
@@ -61,31 +73,36 @@ if [ -z "${METHODS:-}" ]; then
 fi
 read -r -a METHOD_LIST <<< "$METHODS"
 RUN_NAME="${RUN_NAME:-${MODEL_NAME%-local}}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-$PROJECT_DIR/outputs/baselines/$RUN_NAME}"
-LOG_ROOT="${LOG_ROOT:-$PROJECT_DIR/logs/baselines/$RUN_NAME}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-$PROJECT_DIR/outputs/opencompass/$RUN_NAME}"
+LOG_ROOT="${LOG_ROOT:-$PROJECT_DIR/logs/opencompass/$RUN_NAME}"
 
-# Longer than exp05/06 (256/512/256/1024), where 13-16% of MATH answers and
-# 1-6% of GSM8K answers hit the canvas. Early stop makes unused canvas free,
-# and blocks are causal, so answers that ended earlier are unchanged.
+# SDAR's eval config generates up to 4096 tokens on every benchmark
+# (gen_length=4096, eval_sdar_hf.py); so do we since 2026-10-03 (was
+# 512/2048/512/768). Early stop makes unused canvas free, and blocks are
+# causal, so answers that ended earlier are unchanged
+# (../harness/scripts/extend_canvas.py).
 canvas_for() {
     case "$1" in
-        gsm8k) echo 512 ;;
-        humaneval_plus) echo 768 ;;
-        mbpp_plus) echo 512 ;;
-        math_500) echo 2048 ;;
+        gsm8k|math_500|humaneval|mbpp_sanitized|humaneval_plus|mbpp_plus) echo 4096 ;;
         *) echo "ERROR: no canvas for $1" >&2; exit 2 ;;
     esac
 }
 
-# ../data/README.md: full/ holds the complete test sets, sample100/ the exact
-# 100-task samples exp04-06 ran on (TASKS=100 uses those, so runs stay paired).
+# ../data/README.md: opencompass/ holds SDAR's four benchmarks with SDAR's
+# prompts (the default); full/ the legacy exp04-06 files (mbpp_plus,
+# humaneval_plus, and the old gsm8k/math_500 prompts); sample100/ the exact
+# 100-task legacy samples exp04-06 ran on (TASKS=100, so runs stay paired);
+# sample250/ the 250-task development subsets of GSM8K and MATH-500 (TASKS=250:
+# those two, with all of HumanEval's 164 and MBPP's 257, about one precision).
 data_for() {
     if [ "$TASKS" = "100" ]; then echo "$DATA_ROOT/sample100/$1.jsonl"
+    elif [ "$TASKS" = "250" ] && [ -f "$DATA_ROOT/sample250/$1.jsonl" ]; then echo "$DATA_ROOT/sample250/$1.jsonl"
+    elif [ -f "$DATA_ROOT/opencompass/$1.jsonl" ]; then echo "$DATA_ROOT/opencompass/$1.jsonl"
     else echo "$DATA_ROOT/full/$1.jsonl"; fi
 }
 
 SAMPLE_ARGS=()
-case "$TASKS" in all|100) ;; *) SAMPLE_ARGS=(--sample-size "$TASKS") ;; esac
+case "$TASKS" in all|100|250) ;; *) SAMPLE_ARGS=(--sample-size "$TASKS") ;; esac
 
 IFS=, read -r -a CARD_LIST <<< "$CARDS"
 case "${#CARD_LIST[@]}" in
@@ -102,17 +119,31 @@ for bench in $BENCHMARKS; do
     canvas_for "$bench" >/dev/null
 done
 # Refuse to share a card with anyone else's job (process owner, not memory).
-foreign=""
-for gpu in "${CARD_LIST[@]}"; do
-    uuid="$(nvidia-smi --id="$gpu" --query-gpu=uuid --format=csv,noheader)"
-    while IFS=, read -r pid app_uuid; do
-        [ -n "$pid" ] || continue
-        [ "$(echo "$app_uuid" | xargs)" = "$uuid" ] || continue
-        owner="$(ps -o user= -p "$(echo "$pid" | xargs)" 2>/dev/null | xargs || true)"
-        [ "$owner" = "$USER" ] || foreign="$foreign GPU$gpu:pid$(echo "$pid" | xargs)($owner)"
-    done < <(nvidia-smi --query-compute-apps=pid,gpu_uuid --format=csv,noheader)
-done
-if [ -n "$foreign" ]; then
+# WAIT_FOR_CARDS=1 waits for them to clear instead, here and before each
+# benchmark's model load, so the weights never go onto a card someone else holds.
+foreign_jobs() {
+    local found="" gpu uuid pid app_uuid owner
+    for gpu in "${CARD_LIST[@]}"; do
+        uuid="$(nvidia-smi --id="$gpu" --query-gpu=uuid --format=csv,noheader)"
+        while IFS=, read -r pid app_uuid; do
+            [ -n "$pid" ] || continue
+            [ "$(echo "$app_uuid" | xargs)" = "$uuid" ] || continue
+            owner="$(ps -o user= -p "$(echo "$pid" | xargs)" 2>/dev/null | xargs || true)"
+            [ "$owner" = "$USER" ] || found="$found GPU$gpu:pid$(echo "$pid" | xargs)($owner)"
+        done < <(nvidia-smi --query-compute-apps=pid,gpu_uuid --format=csv,noheader)
+    done
+    echo "$found"
+}
+wait_for_cards() {
+    local found
+    found="$(foreign_jobs)"
+    [ -n "$found" ] || return 0
+    echo "== waiting for the cards to clear ($(date '+%m-%d %H:%M:%S')):$found"
+    while [ -n "$(foreign_jobs)" ]; do sleep 60; done
+    echo "== cards clear ($(date '+%m-%d %H:%M:%S'))"
+}
+foreign="$(foreign_jobs)"
+if [ -n "$foreign" ] && [ "${WAIT_FOR_CARDS:-0}" != "1" ]; then
     echo "ERROR: other users' jobs on the requested cards:$foreign" >&2
     exit 2
 fi
@@ -123,14 +154,20 @@ started: $(date '+%Y-%m-%d %H:%M:%S %Z')   host: $(hostname)   cards: $CARDS
 methods: ${METHOD_LIST[*]}
 benchmarks: $BENCHMARKS (canvas $(for b in $BENCHMARKS; do printf '%s=%s ' "$b" "$(canvas_for "$b")"; done))
 tasks: $TASKS per benchmark   seed: $SEED   block: $BLOCK   vocab_limit: $VOCAB_LIMIT   warmups: 3
-recipe: greedy T=0, logp confidence, max_candidates=$BLOCK, early stop on
+recipe: OpenCompass (SDAR eval config) prompts and graders, $DTYPE, greedy T=0, logp confidence, max_candidates=$BLOCK, early stop on
 data: $(dirname -- "$(data_for gsm8k)")
 output: $OUTPUT_ROOT
 INFO
 cat "$LOG_ROOT/RUNINFO.txt"
 [ "${DRY_RUN:-0}" = "1" ] && exit 0
 
-for bench in $BENCHMARKS; do
+# SKIP_GENERATION=1 / SKIP_SCORING=1 split a run into cells that share one
+# OUTPUT_ROOT (one benchmark x method per card, scored once at the end; see
+# run_cells.sh). Scoring while another cell still writes would grade a partial
+# records.jsonl.
+[ "${SKIP_GENERATION:-0}" = "1" ] && BENCH_TO_RUN="" || BENCH_TO_RUN="$BENCHMARKS"
+for bench in $BENCH_TO_RUN; do
+    [ "${WAIT_FOR_CARDS:-0}" = "1" ] && wait_for_cards
     echo "== $bench ($(date '+%H:%M:%S')) =="
     EXPERIMENT_PHYSICAL_GPU_ID="${CARDS//,/+}" CUDA_VISIBLE_DEVICES="$CARDS" \
     PYTHONPATH="$SDAR_OVERLAY:$PYTHONPATH" \
@@ -140,15 +177,17 @@ for bench in $BENCHMARKS; do
         --continuation-length "$(canvas_for "$bench")" \
         --verifier-microbatch-size "$MICROBATCH" \
         --model "$MODEL" --family sdar --block-length "$BLOCK" "${DEVICE_ARGS[@]}" \
-        --dtype bfloat16 --seed "$SEED" \
+        --dtype "$DTYPE" --seed "$SEED" \
         --timing-repeats 1 --warmup-runs 3 --trace-limit 0 --require-lean-logits \
         --max-candidates "$BLOCK" "${SAMPLE_ARGS[@]}" --local-files-only \
         --vocab-limit "$VOCAB_LIMIT" \
         --fixed-temperature 0.0 --fixed-confidence logp \
         --dynamic-temperature 0.0 --dynamic-confidence logp \
+        --contention-guard "${CONTENTION_GUARD:-wait}" \
         --methods "${METHOD_LIST[@]}" \
         >"$LOG_ROOT/$bench.log" 2>&1
 done
+[ "${SKIP_SCORING:-0}" = "1" ] && { echo "Done ($(date '+%H:%M:%S')), scoring skipped"; exit 0; }
 
 echo "== scoring ($(date '+%H:%M:%S')) =="
 for bench in mbpp_plus humaneval_plus; do
@@ -158,6 +197,16 @@ for bench in mbpp_plus humaneval_plus; do
             "$PYTHON_BIN" "$HARNESS_DIR/scripts/score_evalplus.py" --benchmark "$bench" \
                 --parallel "$EVALPLUS_WORKERS" "$method_dir"
         fi
+    done
+done
+# SDAR's own grading (OpenCompass, base tests): humaneval and mbpp_sanitized's
+# score; for legacy humaneval_plus, the headline after evalplus adds base/plus.
+for bench in humaneval mbpp_sanitized humaneval_plus; do
+    [ -d "$OUTPUT_ROOT/$bench" ] || continue
+    for method_dir in "$OUTPUT_ROOT/$bench"/*/; do
+        [ -f "$method_dir/records.jsonl" ] || continue
+        "$PYTHON_BIN" "$HARNESS_DIR/scripts/score_opencompass.py" --benchmark "$bench" \
+            --parallel "$EVALPLUS_WORKERS" "$method_dir"
     done
 done
 "$PYTHON_BIN" "$HARNESS_DIR/scripts/summarize_results.py" --output-root "$OUTPUT_ROOT" \

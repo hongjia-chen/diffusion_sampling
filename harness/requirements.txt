@@ -7,3 +7,6 @@ datasets>=3.0,<5
 evalplus==0.3.1
 matplotlib>=3.8
 pytest>=8.0
+# MATH-500 grader (SDAR/OpenCompass MATHVerifyEvaluator). The antlr4 4.9.3
+# build matches the runtime hydra-core and omegaconf pin in this env.
+math-verify[antlr4_9_3]==0.9.0

@@ -8,6 +8,7 @@ import json
 import os
 import platform
 import random
+import re
 import statistics
 import sys
 import time
@@ -21,7 +22,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from sdar_harness.io import percentile, sha256_file, stream_jsonl, write_json, write_jsonl
 from sdar_harness.blockwise import generate_blockwise
-from sdar_harness.cross import CrossConfig, generate_cross
+from sdar_harness.contention import ContentionGuard, NullGuard, describe
+from sdar_harness.cross import DREAM_GROUP_ROWS, CrossConfig, generate_cross
 from sdar_harness.vgb import VGBConfig, generate_vgb, parse_vgb_spec
 from sdar_harness.model import (
     FAMILIES, MaskedDiffusionProvider, ModelOptions, assert_shared_vocabulary, trained_block_length,
@@ -42,6 +44,7 @@ def parse_method(
     veto: bool = False,
     vgb_budget: int | None = 512,
     vgb_row_chunk: int = 16,
+    group_rows: int = DREAM_GROUP_ROWS,
 ) -> GenerationConfig | VGBConfig:
     """Build one method config.
 
@@ -53,7 +56,8 @@ def parse_method(
     except ValueError as error:
         raise argparse.ArgumentTypeError(
             "methods must look like fixed:4, dynamic:0.90, adaptive:0.10, "
-            "xadaptive:0.10 or xadaptive-remask:0.10"
+            "xadaptive:0.10, xadaptive-remask:0.10, xadaptive-plus1:0.10, xadaptive-plus1c90:0.10, "
+            "xadaptive-os:0.10, xadaptive-dyn95:0.10 or xadaptive-dyn95-band80:0.10"
         ) from error
     if kind == "vgb":
         # Density-ratio VGB, SDAR-8B target / SDAR-1.7B reference (DESIGN.md).
@@ -61,15 +65,33 @@ def parse_method(
         return parse_vgb_spec(raw, continuation_length=continuation_length,
                               budget=vgb_budget, early_stop=early_stop,
                               row_chunk=vgb_row_chunk)
-    cross = kind in ("xadaptive", "xadaptive-remask")
+    # MI rule suffixes (cross.py): "-os" tests each token one-sided (pmi_test
+    # "one_sided"); "-plus1" adds one candidate past the prefix (subset_rule
+    # "prefix_plus_one"), "-plus1c90" only one the proposer gives at least 0.90;
+    # "-dyn95" commits the candidates above 0.95 untested first, then runs the
+    # MI rule on the rest (dynamic_threshold); "-dyn95-band80" holds the least
+    # confident of them back as the MI rule's anchor and offers it only the
+    # candidates above 0.80 (band_floor).
+    variant = re.fullmatch(r"(.+?)(-dyn(\d{2})(?:-band(\d{2}))?)?(-os)?(?:-plus1(?:c(\d{2}))?)?", kind)
+    base_kind = variant.group(1)
+    dynamic_threshold = int(variant.group(3)) / 100 if variant.group(3) else 0.0
+    band_floor = int(variant.group(4)) / 100 if variant.group(4) else 0.0
+    one_sided = variant.group(5) is not None
+    plus_one = kind.endswith("-plus1") or variant.group(6) is not None
+    extra_floor = int(variant.group(6)) / 100 if variant.group(6) else 0.0
+    cross = base_kind in ("xadaptive", "xadaptive-remask")
+    if (plus_one or one_sided or dynamic_threshold) and not cross:
+        raise argparse.ArgumentTypeError(f"-dyn, -os and -plus1 apply to the xadaptive methods only: {kind}")
     if cross:
         # Dream-verified adaptive (DESIGN.md F1-F4). Same proposer recipe as
         # the SDAR-only adaptive arms, so the verifier is the only difference.
         return CrossConfig(
             method="adaptive", delta=float(raw), continuation_length=continuation_length,
             max_candidates=max_candidates, verifier_microbatch_size=microbatch,
-            early_stop=early_stop, remask=(kind == "xadaptive-remask"), veto=veto,
-            **sampling["adaptive"],
+            early_stop=early_stop, remask=(base_kind == "xadaptive-remask"), veto=veto,
+            group_rows=group_rows, subset_rule="prefix_plus_one" if plus_one else "prefix",
+            extra_min_confidence=extra_floor, pmi_test="one_sided" if one_sided else "two_sided",
+            dynamic_threshold=dynamic_threshold, band_floor=band_floor, **sampling["adaptive"],
         )
     if kind not in sampling:
         raise argparse.ArgumentTypeError(f"unknown method kind: {kind}")
@@ -99,10 +121,27 @@ def task_seed(base_seed: int, label: str, example_id: str) -> int:
     return int.from_bytes(digest[:8], "big") % (2**63)
 
 
-# A completion whose first EOS lands this early cannot contain a worked
-# solution; it is the collapse signature, and it is k-dependent, so it belongs
-# in the summary rather than being something you find by reading records.
-EARLY_EOS_TOKENS = 16
+def run_metadata_tag(labels: list[str]) -> str:
+    """The method part of a run-metadata file name: the labels joined by "+",
+    or, for a long method set (a wide δ grid) that would overflow the 255-byte
+    file name limit, the first label, a count and a digest of the rest. The
+    file's "methods" field keeps the full list either way."""
+    tag = "+".join(labels)
+    if len(tag) <= 150:
+        return tag
+    digest = hashlib.sha256(tag.encode()).hexdigest()[:12]
+    return f"{labels[0]}+{len(labels) - 1}more_{digest}"
+
+
+# Metadata fields that change what a task generates. A resumed run must match
+# the records already on disk on every one of them (run_method).
+RESUME_KEYS = (
+    "continuation_length", "block_length", "max_candidates", "temperature", "top_p",
+    "confidence_metric", "early_stop", "stop_token_ids", "vocab_limit", "model",
+    "verifier_model", "dtype", "prompt_template", "base_seed", "remask", "veto",
+    "verifier_group_rows", "subset_rule", "extra_min_confidence", "pmi_test", "dynamic_threshold",
+    "band_floor", "dataset_sha256",
+)
 
 
 def append_jsonl(path: Path, row: dict[str, Any]) -> None:
@@ -251,7 +290,10 @@ def run_method(
     overwrite: bool,
     base_seed: int = 0,
     verifier: MaskedDiffusionProvider | None = None,
+    dataset_sha256: str | None = None,
+    guard: ContentionGuard | NullGuard | None = None,
 ) -> None:
+    guard = guard if guard is not None else NullGuard()
     cross = isinstance(config, CrossConfig)
     vgb = isinstance(config, VGBConfig)
     verifier = verifier if cross or (vgb and config.needs_reference) else None
@@ -335,9 +377,42 @@ def run_method(
         "remask": getattr(config, "remask", None),
         "remask_bottom": getattr(config, "remask_bottom", None) if cross else None,
         "verifier_group_rows": getattr(config, "group_rows", None),
+        "subset_rule": getattr(config, "subset_rule", None),
+        "extra_min_confidence": getattr(config, "extra_min_confidence", None),
+        "pmi_test": getattr(config, "pmi_test", None),
+        "dynamic_threshold": getattr(config, "dynamic_threshold", None),
+        "band_floor": getattr(config, "band_floor", None),
         "prompt_template": "tokenizer_chat_template" if use_chat_template else "raw",
+        # The prompts live in the dataset file, so its hash pins them.
+        "dataset_sha256": dataset_sha256,
+        "protocol": rows[0].get("protocol", "legacy"),
         "vgb": dataclasses.asdict(config) if vgb else None,
+        "contention_guard": guard.settings(),
     }
+    # Resuming skips every task already in records.jsonl, so the records on
+    # disk must come from this same recipe. Without this check a changed
+    # canvas (or model, or seed) would keep the old records and relabel them
+    # under the new metadata.
+    if completed and metadata_path.exists():
+        previous = json.loads(metadata_path.read_text())
+        drift = {
+            key: (previous[key], metadata[key])
+            for key in RESUME_KEYS
+            if key in previous and previous[key] != metadata[key]
+        }
+        if drift:
+            raise RuntimeError(
+                f"{method_dir}: {len(completed)} records were made with a different "
+                f"recipe {drift}; move them aside or pass --overwrite"
+            )
+    # Wall time of each untimed warmup below (a one-off cost, reported apart
+    # from the per-task latencies). A resume with nothing left to run keeps the
+    # value from the run that did them.
+    previous_warmups = (
+        json.loads(metadata_path.read_text()).get("warmup_seconds")
+        if metadata_path.exists() else None
+    )
+    metadata["warmup_seconds"] = previous_warmups
     write_json(metadata_path, metadata)
 
     # Untimed warmups keep startup/JIT/allocator work out of the first task
@@ -346,13 +421,20 @@ def run_method(
     # A VGB warmup is a whole extra task (minutes), and its latency is not a
     # headline number; skip it.
     if first_pending is not None and not vgb:
+        guard.wait_until_clear()
         rendered = provider.render_prompt(first_pending["prompt"], use_chat_template=use_chat_template)
         prompt_ids = provider.encode_prompt(rendered)
+        warmup_seconds: list[float] = []
         for _ in range(warmup_runs):
             torch.manual_seed(task_seed(base_seed, config.label, "__warmup__"))
+            sync()
+            began = time.perf_counter()
             sample(provider, prompt_ids, config, capture_traces=False, verifier=verifier,
                    verifier_prompt_ids=verifier_prompt(first_pending["prompt"]))
             sync()
+            warmup_seconds.append(time.perf_counter() - began)
+        metadata["warmup_seconds"] = warmup_seconds
+        write_json(metadata_path, metadata)
 
     for task_index, row in enumerate(rows):
         example_id = str(row["example_id"])
@@ -375,20 +457,41 @@ def run_method(
         verifier_peaks: list[int] = []
         for_both = dict(verifier=verifier, verifier_prompt_ids=vprompt_ids)
         canonical = None
+        # The contention guard (sdar_harness/contention.py): wait until no other
+        # process holds our cards, watch them while the run is timed, and redo a
+        # run that shared them. Its probes sit outside the timed region.
+        contention_wait = 0.0
+        contention_retries = 0
+        kept_watches = []
         for repeat in range(timing_repeats):
-            torch.manual_seed(task_seed(base_seed, config.label, example_id))
-            for device in devices:
-                reset_peak_memory(device)
-            sync()
-            started = time.perf_counter()
-            result = sample(
-                provider, prompt_ids, config,
-                capture_traces=False, **for_both,
-            )
-            # Both cards: the answer is not done until the verifier's last
-            # forward is, and timing only one device would undercount.
-            sync()
-            latencies.append(time.perf_counter() - started)
+            attempt = 0
+            while True:
+                contention_wait += guard.wait_until_clear()
+                torch.manual_seed(task_seed(base_seed, config.label, example_id))
+                for device in devices:
+                    reset_peak_memory(device)
+                sync()
+                with guard.watch() as watch:
+                    started = time.perf_counter()
+                    result = sample(
+                        provider, prompt_ids, config,
+                        capture_traces=False, **for_both,
+                    )
+                    # Both cards: the answer is not done until the verifier's last
+                    # forward is, and timing only one device would undercount.
+                    sync()
+                    elapsed = time.perf_counter() - started
+                if not watch.contended or attempt >= guard.max_retries:
+                    break
+                attempt += 1
+                contention_retries += 1
+                print(
+                    f"[guard] {config.label}/{example_id}: timed run shared the cards with "
+                    f"{describe(list(watch.processes.values()), guard.uuids)}; redoing it",
+                    flush=True,
+                )
+            kept_watches.append(watch)
+            latencies.append(elapsed)
             if result.prefill_seconds is not None:
                 prefills.append(result.prefill_seconds)
             # A split model's footprint is the sum over its cards; the
@@ -424,6 +527,7 @@ def run_method(
         # timed repeats above must stay exactly as they were, so nothing that
         # measures the parts is allowed to run inside the part being measured.
         stage_seconds: dict[str, float] = {}
+        stage_counts: dict[str, int] = {}
         profiled_wall_seconds = None
         if task_index < profile_limit:
             timer = StageTimer(
@@ -444,16 +548,10 @@ def run_method(
                     f"Profiling changed output for {config.label}/{example_id}"
                 )
             stage_seconds = profiled.stage_seconds
+            stage_counts = profiled.stage_counts
 
         completion = provider.decode(canonical.continuation_token_ids)
         scoring = score_record(row, completion)
-        # Positional, not score-derived. The old flag reported "scoring failed
-        # and an EOS exists", which conflated two things and named neither: it
-        # would not have surfaced a canvas whose first EOS landed at position 3.
-        early_eos = (
-            canonical.eos_position is not None
-            and canonical.eos_position < EARLY_EOS_TOKENS
-        )
         decision_count = max(canonical.denoising_steps, 1)
         committed_count = sum(
             (index + 1) * count
@@ -523,6 +621,7 @@ def run_method(
             # measured in -- the residual against that number is the Python and
             # sampling overhead outside the model. Empty unless profiled.
             "stage_seconds": stage_seconds,
+            "stage_counts": stage_counts,
             "profiled_wall_seconds": profiled_wall_seconds,
             "commit_passes": canonical.commit_passes,
             "timing_repeats_seconds": latencies,
@@ -532,12 +631,20 @@ def run_method(
                 max(values) for values in zip(*device_peaks)
             ],
             "verifier_peak_gpu_memory_bytes": max(verifier_peaks) if verifier_peaks else None,
+            # What the contention guard saw. An empty process list means no other
+            # process held our cards at any probe during the kept timed run(s).
+            "contention_wait_seconds": contention_wait,
+            "contention_retries": contention_retries,
+            "contention_processes": [
+                process for watch in kept_watches for process in watch.record()["contention_processes"]
+            ],
+            "contention_probe_failures": sum(watch.probe_failures for watch in kept_watches),
+            "host_load_1min": [watch.record()["host_load_1min"] for watch in kept_watches],
             **canonical.extras,
             "mean_committed_tokens_per_step": committed_count / decision_count,
             "commitment_histogram": canonical.commitment_histogram,
             "max_candidates": getattr(config, "max_candidates", None),
             "maximum_length_termination": canonical.maximum_length_termination,
-            "early_eos": early_eos,
             "traced": should_trace,
             "position_order": getattr(config, "forward_selection", "confidence"),
             "source": {key: value for key, value in row.items() if key not in {"prompt", "target"}},
@@ -584,6 +691,10 @@ def main() -> None:
     parser.add_argument("--methods", nargs="+", required=True)
     parser.add_argument("--continuation-length", type=int, required=True)
     parser.add_argument("--verifier-microbatch-size", type=int, default=8)
+    # The MI rule's verifier rows per call (dream_verify's group). Separate from
+    # --verifier-microbatch-size, which the MI path never reads: until
+    # 2026-10-15 the group was fixed at DREAM_GROUP_ROWS whatever was passed.
+    parser.add_argument("--verifier-group-rows", type=int, default=DREAM_GROUP_ROWS)
     parser.add_argument("--timing-repeats", type=int, default=3)
     parser.add_argument("--warmup-runs", type=int, default=1,
                         help="untimed generations per method before the timed tasks")
@@ -638,6 +749,16 @@ def main() -> None:
         "generation per profiled task and is OFF by default, because the "
         "measurement must never run inside the timed repeats it explains.",
     )
+    parser.add_argument("--contention-guard", choices=("wait", "off"), default="wait",
+                        help="wait: before each timed run, wait until no other process "
+                        "holds our cards; sample them during the run and redo a run "
+                        "that shared them (sdar_harness/contention.py). off: time "
+                        "whatever is on the cards, as runs before 2026-10-14 did.")
+    parser.add_argument("--contention-poll-seconds", type=float, default=30.0)
+    parser.add_argument("--contention-sample-seconds", type=float, default=5.0)
+    parser.add_argument("--contention-max-retries", type=int, default=10,
+                        help="redo a contended timed run at most this many times, "
+                        "then keep it (its record still lists what it shared with)")
     parser.add_argument("--max-candidates", type=int, default=8,
                         help="cap on tokens proposed (and so committed) per step")
     for kind, default_conf in (("fixed", "logp"), ("adaptive", "logp"), ("dynamic", "logp")):
@@ -714,6 +835,7 @@ def main() -> None:
             veto=args.veto,
             vgb_budget=args.vgb_budget,
             vgb_row_chunk=args.vgb_row_chunk,
+            group_rows=args.verifier_group_rows,
         )
         for value in args.methods
     ]
@@ -731,6 +853,10 @@ def main() -> None:
     torch.manual_seed(args.seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(args.seed)
+    # Loading is a one-off per process, so it is reported in the run metadata,
+    # never in a task's latency.
+    load_seconds: dict[str, float] = {}
+    load_began = time.perf_counter()
     provider = MaskedDiffusionProvider.from_pretrained(
         ModelOptions(
             model_id=args.model, family=args.family,
@@ -745,8 +871,10 @@ def main() -> None:
             allow_block_mismatch=args.allow_block_mismatch,
         )
     )
+    load_seconds["proposer"] = time.perf_counter() - load_began
     verifier = None
     if needs_verifier:
+        load_began = time.perf_counter()
         verifier = MaskedDiffusionProvider.from_pretrained(
             ModelOptions(
                 model_id=args.verifier_model, family=args.verifier_family,
@@ -760,8 +888,10 @@ def main() -> None:
                 allow_block_mismatch=args.allow_block_mismatch,
             )
         )
+        load_seconds["verifier"] = time.perf_counter() - load_began
         assert_shared_vocabulary(provider.tokenizer, verifier.tokenizer, args.vocab_limit)
     run_metadata = {
+        "load_seconds": load_seconds,
         "dataset": str(args.dataset.resolve()),
         "dataset_sha256": sha256_file(args.dataset),
         "benchmark": benchmark,
@@ -802,9 +932,27 @@ def main() -> None:
     worker_label = os.environ.get("EXPERIMENT_PHYSICAL_GPU_ID", str(os.getpid()))
     # One file per (worker, method set): a worker that runs several invocations
     # into the same benchmark directory must not overwrite its earlier record.
-    method_tag = "+".join(config.label for config in configs)
+    method_tag = run_metadata_tag([config.label for config in configs])
     write_json(
         args.output_root / f"run_metadata_worker_{worker_label}__{method_tag}.json", run_metadata
+    )
+    # The guard watches exactly the cards this run holds weights on, named by
+    # UUID from torch itself (CUDA's device order need not be nvidia-smi's).
+    used_devices = list(getattr(provider, "devices", [provider.device])) + (
+        list(getattr(verifier, "devices", [verifier.device])) if verifier is not None else []
+    )
+    card_uuids = sorted({
+        f"GPU-{torch.cuda.get_device_properties(device).uuid}"
+        for device in used_devices if torch.device(device).type == "cuda"
+    })
+    guard = (
+        ContentionGuard(
+            card_uuids,
+            poll_seconds=args.contention_poll_seconds,
+            sample_seconds=args.contention_sample_seconds,
+            max_retries=args.contention_max_retries,
+        )
+        if args.contention_guard == "wait" else NullGuard()
     )
     for config in configs:
         run_method(
@@ -817,6 +965,8 @@ def main() -> None:
             overwrite=args.overwrite,
             base_seed=args.seed,
             verifier=verifier,
+            dataset_sha256=run_metadata["dataset_sha256"],
+            guard=guard,
         )
 
 

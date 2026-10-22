@@ -35,23 +35,43 @@ def stage_breakdown(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
     if not profiled:
         return None
     stages: dict[str, float] = {}
+    calls: dict[str, int] = {}
     for row in profiled:
         for name, value in row["stage_seconds"].items():
             stages[name] = stages.get(name, 0.0) + float(value)
+        for name, value in (row.get("stage_counts") or {}).items():
+            calls[name] = calls.get(name, 0) + int(value)
     count = len(profiled)
     wall = sum(float(row["profiled_wall_seconds"]) for row in profiled) / count
     means = {name: total / count for name, total in stages.items()}
     accounted = sum(means.values())
+    # Everything outside the timed stages: the Python loop and its bookkeeping.
     means["residual"] = wall - accounted
-    return {
+    out = {
         "tasks_profiled": count,
         "profiled_wall_seconds": wall,
+        # The same tasks' timed (unprofiled) latency. Stage timers synchronize
+        # at every boundary, so the profiled run is slower; the ratio says by
+        # how much, and the shares are of the profiled run.
+        "timed_wall_seconds": sum(float(row["wall_time_seconds"]) for row in profiled) / count,
         "seconds": means,
         "share": {
             name: (value / wall if wall > 0 else float("nan"))
             for name, value in means.items()
         },
     }
+    out["profiling_slowdown"] = (
+        wall / out["timed_wall_seconds"] if out["timed_wall_seconds"] > 0 else float("nan")
+    )
+    if calls:
+        steps = sum(int(row["denoising_steps"]) for row in profiled)
+        out["calls_per_task"] = {name: total / count for name, total in calls.items()}
+        out["calls_per_step"] = {name: total / steps for name, total in calls.items()} if steps else {}
+        out["ms_per_call"] = {
+            name: 1000.0 * stages[name] / total
+            for name, total in calls.items() if total and name in stages
+        }
+    return out
 
 
 def summarize_file(path: Path) -> dict[str, Any]:
@@ -102,13 +122,16 @@ def summarize_file(path: Path) -> dict[str, Any]:
         "verifier_microbatch_size": metadata.get("verifier_microbatch_size"),
         "timing_repeats": metadata.get("timing_repeats"),
         "prompt_template": metadata.get("prompt_template"),
+        "protocol": metadata.get("protocol", "legacy"),
         "number_of_tasks": len(rows),
         "number_scored": len(scores),
         "primary_metric": {
-            "mbpp_plus": "MBPP+ pass@1",
-            "humaneval_plus": "HumanEval+ pass@1",
-            "gsm8k": "GSM8K exact match",
-            "math_500": "MATH-500 accuracy",
+            "mbpp_plus": "MBPP+ pass@1, base tests (evalplus)",
+            "humaneval_plus": "HumanEval pass@1, base tests (OpenCompass grading)",
+            "humaneval": "HumanEval pass@1 (OpenCompass)",
+            "mbpp_sanitized": "sanitized MBPP pass@1, 3 asserts (OpenCompass grading)",
+            "gsm8k": "GSM8K accuracy",
+            "math_500": "MATH-500 accuracy (math_verify)",
         }.get(str(rows[0]["benchmark"]), "Primary score"),
         "primary_score": mean([float(value) for value in scores]),
         "seconds_per_task": mean(latencies),
@@ -179,9 +202,6 @@ def summarize_file(path: Path) -> dict[str, Any]:
         "at_cap_rate": (hist[-1] / decision_total) if decision_total else float("nan"),
         "max_candidates": max(int(row.get("max_candidates") or len(hist)) for row in rows),
         "mean_output_token_count": mean([float(row["output_token_count"]) for row in rows]),
-        "early_eos_rate": mean(
-            [float(bool(row.get("early_eos", row.get("premature_eos")))) for row in rows]
-        ),
         "maximum_length_rate": mean(
             [float(bool(row["maximum_length_termination"])) for row in rows]
         ),
@@ -204,6 +224,7 @@ def summarize_file(path: Path) -> dict[str, Any]:
         "syntax_valid",
         "base_test_pass",
         "plus_test_pass",
+        "opencompass_pass",
         "answer_extraction_success",
     ):
         values = [float(row[field]) for row in rows if row.get(field) is not None]

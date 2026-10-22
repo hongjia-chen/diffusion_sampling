@@ -1,12 +1,20 @@
-"""Answer extraction and grading for the four benchmarks.
+"""Answer extraction and grading.
 
-Every benchmark extracts an answer before grading it, because a diffusion model
-fills a fixed canvas and cannot be prompted to stop cleanly:
+Records with `"protocol": "opencompass"` (../data/opencompass/, the default
+since 2026-10-03) are graded exactly as SDAR's OpenCompass config grades them
+(opencompass.py):
+
+    gsm8k           math_postprocess_v2 (last \\boxed), MATHEvaluator v2 equivalence
+    math_500        math_verify (MATHVerifyEvaluator)
+    humaneval       first fenced block; base tests via score_opencompass.py
+    mbpp_sanitized  MBPPEvaluator extraction; its 3 asserts via score_opencompass.py
+
+Legacy records (exp04-06 prompts, no protocol field):
 
     gsm8k           lm-eval `until` truncation, then flexible-extract
-    math_500        last \\boxed{...}, then normalized comparison
-    mbpp_plus       evalplus `sanitize`, then evalplus execution
-    humaneval_plus  evalplus `sanitize`, then evalplus execution
+    math_500        "Problem:" truncation, then math_verify
+    mbpp_plus       evalplus `sanitize`, then evalplus execution (base headline)
+    humaneval_plus  evalplus as above; headline is OpenCompass's base-test grading
 
 Schema JSON, the fourth benchmark of the previous experiment, is deliberately
 absent. See ../README.md.
@@ -18,6 +26,17 @@ import ast
 import re
 from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable
+
+from sdar_harness.opencompass import (
+    extract_boxed_answer,
+    humaneval_answer,
+    math_equiv_v2,
+    math_postprocess_v2,
+    math_verify_agree,
+    mbpp_answer,
+)
+
+OPENCOMPASS = "opencompass"
 
 
 # ----------------------------------------------------------------------
@@ -160,8 +179,9 @@ def normalize_math(answer: str) -> str:
 
     This is a normalizer, not a computer algebra system: it will call
     ``\\frac{1}{2}`` and ``0.5`` different unless both reduce to a number, and
-    it will not expand ``(x+1)^2``. That is the standard MATH-500 convention
-    and it is conservative -- it under-credits rather than over-credits.
+    it will not expand ``(x+1)^2``. It under-credits rather than over-credits.
+    Since 2026-10-03 it only feeds the `string_match` field; `score` comes from
+    `opencompass.math_verify_agree`.
     """
     text = answer.strip()
     for _ in range(3):  # unwrap nesting like \text{\mathrm{x}}
@@ -215,21 +235,51 @@ def math_answers_agree(predicted: str, target: str) -> bool:
     return False
 
 
-def score_math_500(completion: str, target: str) -> dict[str, Any]:
-    text = truncate_at_stop_strings(completion, MATH_UNTIL)
-    extracted = extract_boxed(text)
-    correct = extracted is not None and math_answers_agree(extracted, target)
-    if extracted is None:
-        failure = "no_boxed_answer"
-    elif not correct:
-        failure = "wrong_answer"
-    else:
+def score_gsm8k_opencompass(completion: str, target: str) -> dict[str, Any]:
+    """gsm8k_0shot_v2_gen_17d799: math_postprocess_v2, MATHEvaluator(version='v2').
+
+    `target` is already `gsm8k_dataset_postprocess(answer)` (the number after
+    ####, commas removed). No stop-string truncation: OpenCompass cuts only at
+    the model's stop tokens, which the decoder already did.
+    """
+    boxed = extract_boxed_answer(completion, strip_double_curly_brace=True)
+    predicted = math_postprocess_v2(completion)
+    correct = math_equiv_v2(predicted, target)
+    if correct:
         failure = None
+    elif not boxed:
+        failure = "no_boxed_answer"
+    else:
+        failure = "wrong_answer"
     return {
-        "parsed_output": extracted,
+        "parsed_output": predicted,
         "score": bool(correct),
         "failure_type": failure,
+        "answer_extraction_success": bool(boxed),
+    }
+
+
+def score_math_500(completion: str, target: str, *, truncate: bool = True) -> dict[str, Any]:
+    # OpenCompass does not cut at "Problem:"; the legacy prompt, which ends
+    # in "Solution:", needs it against a hallucinated next problem.
+    text = truncate_at_stop_strings(completion, MATH_UNTIL) if truncate else completion
+    extracted = extract_boxed(text)
+    correct, verified_answer = math_verify_agree(text, target)
+    if correct:
+        failure = None
+    elif extracted is None:
+        failure = "no_boxed_answer"
+    else:
+        failure = "wrong_answer"
+    return {
+        "parsed_output": extracted,
+        "score": correct,
+        "failure_type": failure,
         "answer_extraction_success": extracted is not None,
+        "math_verify_answer": verified_answer,
+        # The pre-2026-10-03 string scorer, kept so exp05/06 numbers stay
+        # traceable. Never the headline.
+        "string_match": extracted is not None and math_answers_agree(extracted, target),
         "normalized_output": None if extracted is None else normalize_math(extracted),
         "normalized_target": normalize_math(target),
         "truncated_by_stop_string": text != completion,
@@ -251,6 +301,15 @@ def score_code_syntax(completion: str) -> dict[str, Any]:
         return {
             "syntax_valid": False,
             "syntax_error": f"{error.msg} (line {error.lineno})",
+        }
+    except (MemoryError, RecursionError) as error:
+        # Python 3.10's parser raises MemoryError, not SyntaxError, on very deep
+        # nesting such as a long run of unary operators ("----...1"), which a
+        # runaway completion can be (8B-b16 fixed:8, HumanEval, 2026-10-16). It
+        # cannot compile either, so the OpenCompass grade fails it too.
+        return {
+            "syntax_valid": False,
+            "syntax_error": f"too deeply nested to parse ({type(error).__name__})",
         }
 
 
@@ -339,10 +398,22 @@ def sanitize_code(
 
 def score_record(record: dict[str, Any], completion: str) -> dict[str, Any]:
     benchmark = record["benchmark"]
+    opencompass = record.get("protocol") == OPENCOMPASS
     if benchmark == "gsm8k":
+        if opencompass:
+            return score_gsm8k_opencompass(completion, str(record["target"]))
         return score_gsm8k(completion, str(record["target"]))
     if benchmark == "math_500":
-        return score_math_500(completion, str(record["target"]))
+        return score_math_500(completion, str(record["target"]), truncate=not opencompass)
+    if benchmark in ("humaneval", "mbpp_sanitized"):
+        # SDAR's code benchmarks. Executed afterwards by score_opencompass.py.
+        solution = humaneval_answer(completion) if benchmark == "humaneval" else mbpp_answer(completion)
+        return {
+            "parsed_output": solution,
+            "score": None,
+            "failure_type": None,
+            **score_code_syntax(solution),
+        }
     if benchmark in CODE_BENCHMARKS:
         # `score` stays None until evalplus executes the tests; the run itself
         # never claims a pass rate it has not measured.

@@ -99,6 +99,27 @@ def test_math_500_scoring_end_to_end() -> None:
     assert bad["score"] is False
     assert bad["failure_type"] == "no_boxed_answer"
     assert bad["answer_extraction_success"] is False
+    wrong = score_record(record, r"\boxed{\frac{1}{3}}")
+    assert wrong["score"] is False
+    assert wrong["failure_type"] == "wrong_answer"
+
+
+def test_math_500_score_is_symbolic() -> None:
+    # Pairs the string normalizer called wrong on SDAR-8B MATH-500 (2026-10-03).
+    for answer, target in [
+        (r"\frac{4}{3}", r"\frac43"),
+        (r"11\sqrt{2}", r"11\sqrt2"),
+        ("C", "(C)"),
+        ("5", "x=5"),
+        (r"3+2\sqrt{2},3-2\sqrt{2}", r"3\pm2\sqrt{2}"),
+        (r"\begin{pmatrix}-\frac{1}{3}\\\frac{2}{3}\end{pmatrix}",
+         r"\begin{pmatrix}-1/3\\2/3\end{pmatrix}"),
+    ]:
+        result = score_math_500(rf"So the answer is $\boxed{{{answer}}}$.", target)
+        assert result["score"] is True, (answer, target)
+        assert result["string_match"] is False, (answer, target)
+    assert score_math_500(r"\boxed{(x+1)^2}", "x^2+2x+1")["score"] is True
+    assert score_math_500(r"\boxed{-0.09}", r"\frac{9}{100}")["score"] is False
 
 
 # ------------------------------------------------------- code benchmarks
@@ -119,6 +140,16 @@ def test_code_syntax_failure_is_recorded_not_raised() -> None:
     result = score_record(record, "def f(:\n  pass")
     assert result["syntax_valid"] is False
     assert result["syntax_error"]
+
+
+def test_code_too_deep_to_parse_is_invalid_not_raised() -> None:
+    # Python 3.10's parser raises MemoryError on a long unary-operator run; a
+    # runaway 8B-b16 fixed:8 HumanEval completion took the whole run down.
+    for benchmark in ("humaneval", "mbpp_sanitized"):
+        record = {"benchmark": benchmark, "protocol": "opencompass", "entry_point": "f"}
+        result = score_record(record, "def f():\n    return " + "-" * 100_000 + "1\n")
+        assert result["syntax_valid"] is False
+        assert "too deeply nested" in result["syntax_error"]
 
 
 def test_humaneval_completion_style_is_repaired_and_recorded() -> None:

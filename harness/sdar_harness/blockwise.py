@@ -215,7 +215,7 @@ def generate_blockwise(
     prefill_clock.start()
     if prefill_length:
         # The prompt's own blocks. Not all-ones: block 0 must not see block 1.
-        with timer("commit"):
+        with timer("prefill"):
             provider.commit(
                 canvas[:, :prefill_length],
                 attention[:prefill_length, :prefill_length],
@@ -276,12 +276,14 @@ def generate_blockwise(
             if config.early_stop:
                 # Earlier blocks are complete, so writing this block back is
                 # all it takes for the canvas to be current. 64 tokens; cheap.
-                canvas[:, low:high] = state
-                if finished_at(
-                    canvas[0, canvas_low:canvas_high],
-                    mask_token_id=provider.mask_token_id,
-                    stop_ids=stop_ids,
-                ) is not None:
+                with timer("stop_check"):
+                    canvas[:, low:high] = state
+                    finished = finished_at(
+                        canvas[0, canvas_low:canvas_high],
+                        mask_token_id=provider.mask_token_id,
+                        stop_ids=stop_ids,
+                    )
+                if finished is not None:
                     early_stopped = True
                     break
 
@@ -311,6 +313,7 @@ def generate_blockwise(
         full_continuation_token_ids=[int(value) for value in continuation],
         commit_passes=commit_passes,
         stage_seconds=timer.totals(),
+        stage_counts=timer.counts(),
         stop_token_id=stop_token,
         early_stopped=early_stopped,
         decoded_positions=sum(1 for value in continuation if value != provider.mask_token_id),

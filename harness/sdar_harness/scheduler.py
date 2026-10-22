@@ -111,8 +111,17 @@ class GenerationConfig:
             return f"fixed_k_{self.fixed_k}"
         if self.method == "dynamic":
             return f"dynamic_theta_{self.threshold:.2f}".replace(".", "p")
-        value = f"{self.delta:.2f}".replace(".", "p")
-        return f"adaptive_delta_{value}"
+        return f"adaptive_delta_{delta_label(self.delta)}"
+
+
+def delta_label(delta: float) -> str:
+    """δ as it appears in a method label: two decimals (0p10, 10p00) when that
+    is exact, otherwise compact (0p001, 1e06), so a wide δ grid never gives two
+    arms one name."""
+    value = f"{delta:.2f}"
+    if float(value) != delta or delta >= 1e4:
+        value = f"{delta:g}".replace("e+", "e").replace("e-", "em")
+    return value.replace(".", "p")
 
 
 @dataclass(frozen=True)
@@ -165,6 +174,9 @@ class GenerationResult:
     # otherwise -- profiling is opt-in and costs a pair of CUDA events per
     # stage occurrence.
     stage_seconds: dict[str, float] = field(default_factory=dict)
+    # Calls per stage in that profiled run (timing.py lists the stages), so a
+    # breakdown can say milliseconds per call as well as seconds per task.
+    stage_counts: dict[str, int] = field(default_factory=dict)
     # Wall time of the prompt prefill (the KV-cache commit of the prompt's
     # whole blocks), measured inside every timed run without synchronizing.
     # None for samplers that have no separate prefill.
@@ -276,41 +288,55 @@ def _propose(
     temperature: float = 0.0,
     top_p: float | None = None,
     confidence: str = "logp",
+    timer: StageTimer = NULL_TIMER,
 ) -> CandidateSet:
+    """Rank the proposer's pick at every masked position by confidence.
+
+    Profiled as "propose_forward" (the model call: the transformer body plus
+    the output head over the masked positions, one call per step) and
+    "propose_rank" (log-softmax, token choice and the confidence sort).
+    """
     excluded = provider.excluded_token_ids
     if _uses_lean_path(provider):
         # log_softmax and max are both row-wise, so chunking over masked
         # positions is numerically identical to scoring them in one shot.
-        hidden = provider.hidden_states(state)
+        with timer("propose_forward"):
+            hidden = provider.hidden_states(state)
         rows = torch.zeros_like(remaining)
         logp_parts: list[torch.Tensor] = []
         id_parts: list[torch.Tensor] = []
         chunk_size = _proposer_chunk(top_p)
         for start in range(0, int(remaining.numel()), chunk_size):
             stop = start + chunk_size
-            chunk_logits = provider.logits_from_hidden(
-                hidden, rows[start:stop], remaining[start:stop]
-            )
-            chunk_log_probs = _filtered_log_probs(chunk_logits, excluded)
-            values, indices = _select_tokens(chunk_log_probs, temperature, top_p, confidence)
+            with timer("propose_forward", count=False):
+                chunk_logits = provider.logits_from_hidden(
+                    hidden, rows[start:stop], remaining[start:stop]
+                )
+            with timer("propose_rank", count=start == 0):
+                chunk_log_probs = _filtered_log_probs(chunk_logits, excluded)
+                values, indices = _select_tokens(chunk_log_probs, temperature, top_p, confidence)
             logp_parts.append(values)
             id_parts.append(indices)
             del chunk_logits, chunk_log_probs
-        top_logps = torch.cat(logp_parts)
-        top_ids = torch.cat(id_parts)
+        with timer("propose_rank", count=False):
+            top_logps = torch.cat(logp_parts)
+            top_ids = torch.cat(id_parts)
         del hidden
     else:
-        logits = provider.forward_logits(state)
-        masked_logits = logits[0].index_select(0, remaining)
-        log_probs = _filtered_log_probs(masked_logits, excluded)
-        top_logps, top_ids = _select_tokens(log_probs, temperature, top_p, confidence)
-    order = torch.argsort(top_logps, descending=True, stable=True)
-    order = order[: min(max_candidates, remaining.numel())]
-    return CandidateSet(
-        sequence_positions=remaining.index_select(0, order),
-        token_ids=top_ids.index_select(0, order),
-        confidences=top_logps.index_select(0, order),
-    )
+        with timer("propose_forward"):
+            logits = provider.forward_logits(state)
+        with timer("propose_rank"):
+            masked_logits = logits[0].index_select(0, remaining)
+            log_probs = _filtered_log_probs(masked_logits, excluded)
+            top_logps, top_ids = _select_tokens(log_probs, temperature, top_p, confidence)
+    with timer("propose_rank", count=False):
+        order = torch.argsort(top_logps, descending=True, stable=True)
+        order = order[: min(max_candidates, remaining.numel())]
+        return CandidateSet(
+            sequence_positions=remaining.index_select(0, order),
+            token_ids=top_ids.index_select(0, order),
+            confidences=top_logps.index_select(0, order),
+        )
 
 
 def _score_all_prefixes(
@@ -478,16 +504,16 @@ def generation_step(
     )
     if remaining.numel() == 0:
         raise ValueError("generation_step called on a complete state")
-    with timer("proposer"):
-        candidates = _propose(
-            provider,
-            state,
-            remaining,
-            config.max_candidates,
-            temperature=config.temperature,
-            top_p=config.top_p,
-            confidence=config.confidence,
-        )
+    candidates = _propose(
+        provider,
+        state,
+        remaining,
+        config.max_candidates,
+        temperature=config.temperature,
+        top_p=config.top_p,
+        confidence=config.confidence,
+        timer=timer,
+    )
     marginal: torch.Tensor | None = None
     conditional: torch.Tensor | None = None
     errors: torch.Tensor | None = None
@@ -499,7 +525,8 @@ def generation_step(
         # SDAR's low_confidence_dynamic with one token per step as the floor
         # (denoising_steps = block_length). Candidates are sorted by
         # probability, so the ones above the threshold are a prefix.
-        confident = int((candidates.confidences > config.threshold).sum().item())
+        with timer("decide"):
+            confident = int((candidates.confidences > config.threshold).sum().item())
         accepted = max(1, confident)
     else:
         assert config.tau_nats is not None
@@ -522,25 +549,27 @@ def generation_step(
         passing[0] = True
         accepted = int(torch.cumprod(passing.to(torch.int64), dim=0).sum().item())
 
-    next_state = state.clone()
-    accepted_positions = candidates.sequence_positions[:accepted]
-    accepted_tokens = candidates.token_ids[:accepted]
-    next_state[0, accepted_positions] = accepted_tokens
+    with timer("decide", count=config.method != "dynamic"):
+        next_state = state.clone()
+        accepted_positions = candidates.sequence_positions[:accepted]
+        accepted_tokens = candidates.token_ids[:accepted]
+        next_state[0, accepted_positions] = accepted_tokens
     # EOS is an ordinary committed token during denoising. In particular, do
     # not fill the suffix with EOS: both schedulers must finish the same fixed
     # canvas, and the caller truncates the decoded completion only afterwards.
-    eos_position = _first_eos_position(
-        next_state,
-        canvas_start=canvas_start,
-        canvas_length=config.continuation_length,
-        stop_ids=stop_token_ids(provider),
-    )
-    remaining_after = _remaining_positions(
-        next_state,
-        canvas_start=canvas_start,
-        canvas_length=config.continuation_length,
-        mask_token_id=provider.mask_token_id,
-    )
+    with timer("decide", count=False):
+        eos_position = _first_eos_position(
+            next_state,
+            canvas_start=canvas_start,
+            canvas_length=config.continuation_length,
+            stop_ids=stop_token_ids(provider),
+        )
+        remaining_after = _remaining_positions(
+            next_state,
+            canvas_start=canvas_start,
+            canvas_length=config.continuation_length,
+            mask_token_id=provider.mask_token_id,
+        )
     trace: dict[str, Any] = {}
     if capture_trace:
         trace = {
@@ -658,6 +687,7 @@ def generate(
         verifier_forward_passes=verifier_forward_passes,
         commitment_histogram=histogram,
         stage_seconds=timer.totals(),
+        stage_counts=timer.counts(),
         eos_position=eos_position,
         maximum_length_termination=eos_position is None,
         full_continuation_token_ids=[int(value) for value in continuation],
