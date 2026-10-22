@@ -1,8 +1,0 @@
-# Install PyTorch separately using the cluster-supported CUDA build.
-# Dream-v0-Instruct-7B records transformers_version=4.46.2 in config.json.
-transformers==4.46.2
-datasets>=3.0,<5
-evalplus==0.3.1
-jsonschema>=4.23
-matplotlib>=3.8
-pytest>=8.0
