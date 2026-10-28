@@ -26,7 +26,8 @@ from sdar_harness.contention import ContentionGuard, NullGuard, describe
 from sdar_harness.cross import DREAM_GROUP_ROWS, CrossConfig, generate_cross
 from sdar_harness.vgb import VGBConfig, generate_vgb, parse_vgb_spec
 from sdar_harness.model import (
-    FAMILIES, MaskedDiffusionProvider, ModelOptions, assert_shared_vocabulary, trained_block_length,
+    ATTENTION_KERNELS, FAMILIES, MaskedDiffusionProvider, ModelOptions, assert_shared_vocabulary,
+    trained_block_length,
 )
 from sdar_harness.timing import StageTimer
 from sdar_harness.scheduler import GenerationConfig, generate
@@ -140,7 +141,7 @@ RESUME_KEYS = (
     "confidence_metric", "early_stop", "stop_token_ids", "vocab_limit", "model",
     "verifier_model", "dtype", "prompt_template", "base_seed", "remask", "veto",
     "verifier_group_rows", "subset_rule", "extra_min_confidence", "pmi_test", "dynamic_threshold",
-    "band_floor", "dataset_sha256",
+    "band_floor", "dataset_sha256", "attention_kernel",
 )
 
 
@@ -368,6 +369,8 @@ def run_method(
         "model": provider.tokenizer.name_or_path,
         "model_revision": getattr(provider.model.config, "_commit_hash", None),
         "dtype": str(next(provider.model.parameters()).dtype).replace("torch.", ""),
+        "attention_kernel": getattr(provider, "attention_kernel", "sdpa_mask"),
+        "prefix_buffer": getattr(provider, "prefix_buffer", False),
         "proposer_is_verifier": verifier is None,
         "devices": [str(device) for device in proposer_devices],
         "layer_split": getattr(provider, "layer_split", None),
@@ -737,6 +740,12 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=12345)
     parser.add_argument("--no-chat-template", action="store_true")
     parser.add_argument("--limit", type=int)
+    parser.add_argument("--attention-kernel", choices=ATTENTION_KERNELS, default="sdpa_mask",
+                        help="sdpa_nomask drops the all-True mask of block-local forwards so SDPA "
+                        "can use its flash kernel (needs the patched local model; see ModelOptions)")
+    parser.add_argument("--prefix-buffer", action="store_true",
+                        help="copy the cached prefix into a per-block K/V buffer once instead of "
+                        "concatenating it every step (bit-identical; blockwise.PrefixBuffer)")
     parser.add_argument("--require-lean-logits", action="store_true",
                         help="fail at load if the memory-lean logits path is unavailable")
     parser.add_argument(
@@ -869,6 +878,7 @@ def main() -> None:
             vocab_limit=args.vocab_limit,
             stop_token_ids=tuple(args.stop_token_ids) if args.stop_token_ids else None,
             allow_block_mismatch=args.allow_block_mismatch,
+            attention_kernel=args.attention_kernel, prefix_buffer=args.prefix_buffer,
         )
     )
     load_seconds["proposer"] = time.perf_counter() - load_began
@@ -886,6 +896,7 @@ def main() -> None:
                 cache_dir=args.cache_dir, local_files_only=args.local_files_only,
                 require_lean_logits=True, vocab_limit=args.vocab_limit,
                 allow_block_mismatch=args.allow_block_mismatch,
+                attention_kernel=args.attention_kernel, prefix_buffer=args.prefix_buffer,
             )
         )
         load_seconds["verifier"] = time.perf_counter() - load_began

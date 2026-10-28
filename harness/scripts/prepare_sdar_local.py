@@ -24,6 +24,19 @@ themselves supply:
      mask falls through to SDPA with an all-True `attn_mask`, which is the same
      function of the same inputs.
 
+Two more patches (2026-10-27) are opt-in hooks, inert unless the harness asks:
+
+  3. Prefix buffer. A cache with a `concat_block` method returns the
+     [prefix; block] K/V itself, so the prefix is copied into a buffer once per
+     block instead of `torch.cat`-ed onto every row in every step
+     (--prefix-buffer; bit-identical tensors).
+
+  4. SDPA without an all-ones mask. With `full_attention=True` the SDPA call
+     gets no mask. Block-local forwards attend to every key, so the attention
+     is the same, but SDPA can then use its flash kernel: with an explicit mask
+     and GQA it can only run the fp32 math kernel (--attention-kernel
+     sdpa_nomask; changes fp16 rounding, not the function).
+
 Nothing else is touched: the block-causal masking, the `store_kv` cache
 discipline and the logits alignment are all the checkpoint's own.
 
@@ -67,11 +80,67 @@ ATTN_NEW = (
     "        if \"flash_attn_func\" in globals() and torch.all(attention_mask):  # decoding"
 )
 
+# Two opt-in hooks for the harness (2026-10-27). With neither requested the
+# code path is the original: no cache has `concat_block` unless the harness's
+# --prefix-buffer builds one, and nothing passes `full_attention` unless
+# --attention-kernel sdpa_nomask does.
+PREFIX_OLD = """            # only retrive, do not store kv
+            past_key_states, past_value_states = past_key_value[self.layer_idx]
+            key_states = torch.cat(
+                [past_key_states, key_states], dim=-2)
+            value_states = torch.cat(
+                [past_value_states, value_states], dim=-2)"""
+PREFIX_NEW = """            # only retrive, do not store kv
+            # PATCHED: a cache that keeps the prefix in a per-block buffer (the
+            # harness's --prefix-buffer) hands back the same [prefix; block]
+            # tensors without re-copying the prefix; any other cache cats.
+            concat_block = getattr(past_key_value, "concat_block", None)
+            if concat_block is not None:
+                key_states, value_states = concat_block(
+                    self.layer_idx, key_states, value_states)
+            else:
+                past_key_states, past_value_states = past_key_value[self.layer_idx]
+                key_states = torch.cat(
+                    [past_key_states, key_states], dim=-2)
+                value_states = torch.cat(
+                    [past_value_states, value_states], dim=-2)"""
+
+SDPA_OLD = """            attn_output = F.scaled_dot_product_attention(
+                query=query_states,
+                key=key_states,
+                value=value_states,
+                attn_mask=attention_mask,"""
+SDPA_NEW = """            # PATCHED: a caller that knows every key is attendable (the
+            # harness's --attention-kernel sdpa_nomask, block-local forwards
+            # only) passes full_attention=True. The mask is all True there, so
+            # dropping it computes the same attention, and SDPA may then pick
+            # its flash kernel; an explicit mask with GQA forces the math one.
+            attn_output = F.scaled_dot_product_attention(
+                query=query_states,
+                key=key_states,
+                value=value_states,
+                attn_mask=None if kwargs.get("full_attention", False) else attention_mask,"""
+
 PATCHES = [
     ("rms import", RMS_IMPORT_OLD, RMS_IMPORT_NEW),
     ("rms forward", RMS_FORWARD_OLD, RMS_FORWARD_NEW),
     ("attention branch", ATTN_OLD, ATTN_NEW),
+    ("prefix buffer hook", PREFIX_OLD, PREFIX_NEW),
+    ("sdpa without an all-ones mask", SDPA_OLD, SDPA_NEW),
 ]
+
+
+def patch_modeling(text: str) -> str:
+    """The checkpoint's modeling file with every patch applied, or SystemExit."""
+    for label, old, new in PATCHES:
+        if old not in text:
+            raise SystemExit(
+                f"patch {label!r} did not match; the checkpoint's modeling file "
+                f"has changed and the patches must be re-derived before trusting "
+                f"any number produced with it."
+            )
+        text = text.replace(old, new, 1)
+    return text
 
 
 def main() -> None:
@@ -100,27 +169,23 @@ def main() -> None:
         # Symlink the weights rather than copying several GB.
         os.symlink(entry.resolve(), target / entry.name)
 
-    text = (source / patched_name).read_text(encoding="utf-8")
-    for label, old, new in PATCHES:
-        if old not in text:
-            raise SystemExit(
-                f"patch {label!r} did not match; the checkpoint's modeling file "
-                f"has changed and the patches must be re-derived before trusting "
-                f"any number produced with it."
-            )
-        text = text.replace(old, new, 1)
+    text = patch_modeling((source / patched_name).read_text(encoding="utf-8"))
     (target / patched_name).write_text(text, encoding="utf-8")
 
     (target / "PATCHES.md").write_text(
         f"# Local patched copy of {args.repo}\n\n"
         f"Source snapshot: {source}\n"
         f"Everything is a symlink to that snapshot except `{patched_name}`, which\n"
-        f"carries {len(PATCHES)} patches so the model loads without flash_attn:\n\n"
+        f"carries {len(PATCHES)} patches: the first three let the model load without\n"
+        f"flash_attn, the last two are opt-in hooks for the harness:\n\n"
         + "".join(f"{i+1}. {label}\n" for i, (label, _, _) in enumerate(PATCHES))
         + "\nBoth fallbacks are the authors' own code: the pure-PyTorch RMSNorm is\n"
           "commented out in their file directly beneath the flash call, and the SDPA\n"
           "attention path is the branch they already use for prefill. Neither changes\n"
-          "the function being computed.\n\n"
+          "the function being computed. The two hooks are inert unless the harness\n"
+          "asks for them (--prefix-buffer, --attention-kernel sdpa_nomask); the\n"
+          "buffer returns bit-identical tensors, and dropping an all-True mask leaves\n"
+          "the attention unchanged up to the kernel's rounding.\n\n"
           "Regenerate with `python scripts/prepare_sdar_local.py " + args.repo + " --force`.\n",
         encoding="utf-8",
     )

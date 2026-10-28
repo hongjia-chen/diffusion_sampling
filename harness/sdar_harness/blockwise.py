@@ -108,6 +108,61 @@ class ExpandedCache(_cache_base()):
         )
 
 
+class PrefixBuffer:
+    """One block's K/V per layer: the cached prefix copied in once, the block in place.
+
+    SDAR's attention builds [prefix; block] for every row with a `torch.cat`
+    in every layer of every denoising forward, re-copying a prefix that does
+    not change within a block. Here each layer gets a buffer of
+    [rows, kv_heads, prefix + B, head_dim] with the prefix written once; each
+    forward writes only its B block positions into the tail and hands back the
+    first `rows` rows. That slice has the cat's exact shape, strides and
+    values, so attention is bit-identical (profile_attention.py checks it on
+    the real models). The buffer grows, re-copying the prefix, when a forward
+    needs more rows than it holds; it lives as long as its BlockCacheProvider,
+    one block.
+    """
+
+    def __init__(self, cache: Any):
+        self._cache = cache
+        self._keys: dict[int, torch.Tensor] = {}
+        self._values: dict[int, torch.Tensor] = {}
+        self.prefix_copies = 0
+
+    def concat(self, layer: int, keys: torch.Tensor, values: torch.Tensor):
+        rows, length = int(keys.shape[0]), int(keys.shape[-2])
+        past_keys, past_values = self._cache[layer]
+        prefix = int(past_keys.shape[-2])
+        held_keys = self._keys.get(layer)
+        if held_keys is None or held_keys.shape[0] < rows or held_keys.shape[-2] != prefix + length:
+            shape = (rows, past_keys.shape[1], prefix + length, past_keys.shape[-1])
+            held_keys = past_keys.new_empty(shape)
+            held_values = past_values.new_empty(shape)
+            held_keys[:, :, :prefix] = past_keys
+            held_values[:, :, :prefix] = past_values
+            self._keys[layer], self._values[layer] = held_keys, held_values
+            self.prefix_copies += 1
+        out_keys, out_values = held_keys[:rows], self._values[layer][:rows]
+        out_keys[:, :, prefix:] = keys
+        out_values[:, :, prefix:] = values
+        return out_keys, out_values
+
+
+class BufferedCache(ExpandedCache):
+    """An ExpandedCache whose forward reads [prefix; block] from a PrefixBuffer.
+
+    The patched SDAR attention calls `concat_block` instead of concatenating
+    when the cache has one ("prefix buffer hook", prepare_sdar_local.py).
+    """
+
+    def __init__(self, cache: Any, batch_size: int, buffer: PrefixBuffer):
+        super().__init__(cache, batch_size)
+        object.__setattr__(self, "_buffer", buffer)
+
+    def concat_block(self, layer_index: int, keys: torch.Tensor, values: torch.Tensor):
+        return self._buffer.concat(layer_index, keys, values)
+
+
 class BlockCacheProvider:
     """Presents one block, against a cached prefix, with the scheduler's API.
 
@@ -132,6 +187,9 @@ class BlockCacheProvider:
         self.stop_token_ids = stop_token_ids(provider)
         self.device = provider.device
         self.forward_passes = 0
+        # Opt-in (ModelOptions): drop the all-True mask, keep the prefix in a buffer.
+        self._full_attention = getattr(provider, "attention_kernel", "sdpa_mask") == "sdpa_nomask"
+        self._buffer = PrefixBuffer(cache) if getattr(provider, "prefix_buffer", False) else None
 
     @property
     def excluded_token_ids(self) -> set[int]:
@@ -143,13 +201,24 @@ class BlockCacheProvider:
 
     def _kwargs(self, block_ids: torch.Tensor) -> dict[str, Any]:
         rows = int(block_ids.shape[0])
-        return {
+        if not len(self._cache):
+            past = None
+        elif self._buffer is not None:
+            past = BufferedCache(self._cache, rows, self._buffer)
+        else:
+            past = ExpandedCache(self._cache, rows)
+        kwargs = {
             "attention_mask": self._attention_mask.unsqueeze(0),
             "position_ids": self._position_ids.unsqueeze(0).expand(rows, -1),
-            "past_key_values": ExpandedCache(self._cache, rows) if len(self._cache) else None,
+            "past_key_values": past,
             "use_cache": True,
             "store_kv": False,
         }
+        if self._full_attention:
+            # The key slice is exactly the attendable set (see generate_blockwise),
+            # so the mask is all True and the patched attention may drop it.
+            kwargs["full_attention"] = True
+        return kwargs
 
     @torch.inference_mode()
     def hidden_states(self, block_ids: torch.Tensor) -> torch.Tensor:
@@ -226,6 +295,12 @@ def generate_blockwise(
     prefill_clock.stop()
 
     stop_ids = stop_token_ids(provider)
+    # A block commit, like a denoising step, attends to its whole prefix.
+    commit_kwargs = (
+        {"full_attention": True}
+        if getattr(provider, "attention_kernel", "sdpa_mask") == "sdpa_nomask"
+        else {}
+    )
     canvas_low, canvas_high = prompt_length, prompt_length + generated
     early_stopped = False
     traces: list[dict[str, Any]] = []
@@ -296,7 +371,8 @@ def generate_blockwise(
         # counted: a block costs `steps + 1` passes, not `steps`.
         with timer("commit"):
             provider.commit(
-                canvas[:, low:high], attention[low:high, :high], positions[low:high], cache
+                canvas[:, low:high], attention[low:high, :high], positions[low:high], cache,
+                **commit_kwargs,
             )
         commit_passes += 1
 

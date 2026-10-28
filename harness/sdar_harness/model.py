@@ -318,6 +318,16 @@ class ModelOptions:
     # Decode an SDAR checkpoint at a block length other than the one it was
     # trained with. Out of distribution; for robustness ablations only.
     allow_block_mismatch: bool = False
+    # Block-local forwards (every denoising step and block commit) attend to
+    # every key, so their mask is all True. "sdpa_mask" passes it anyway, which
+    # with GQA leaves SDPA only its fp32 math kernel; "sdpa_nomask" drops it so
+    # SDPA can use its flash kernel (same attention, different fp16 rounding).
+    # Needs the local model's "sdpa without an all-ones mask" patch.
+    attention_kernel: str = "sdpa_mask"
+    # Copy the cached prefix into a per-block K/V buffer once instead of
+    # concatenating it onto every row in every step (blockwise.PrefixBuffer).
+    # Bit-identical; costs rows x prefix of K/V memory for the whole block.
+    prefix_buffer: bool = False
 
     def __post_init__(self) -> None:
         if not self.model_id:
@@ -328,6 +338,10 @@ class ModelOptions:
             )
         if self.block_length is not None and self.block_length < 1:
             raise ValueError("block_length must be positive")
+        if self.attention_kernel not in ATTENTION_KERNELS:
+            raise ValueError(
+                f"unknown attention_kernel {self.attention_kernel!r}; known: {ATTENTION_KERNELS}"
+            )
         trained = trained_block_length(self.model_id) if self.family == "sdar" else None
         decoded = self.conventions.block_length
         if trained is not None and decoded != trained and not self.allow_block_mismatch:
@@ -351,6 +365,43 @@ class ModelOptions:
         if self.block_length is None:
             return base
         return replace(base, block_length=self.block_length)
+
+
+ATTENTION_KERNELS = ("sdpa_mask", "sdpa_nomask")
+
+
+def check_attention_hooks(model: Any, attention_kernel: str, prefix_buffer: bool) -> None:
+    """Refuse an attention option the loaded modeling code would silently ignore.
+
+    Both options need the local model's opt-in patches (prepare_sdar_local.py):
+    without them a run would be labelled with a kernel or buffer it never used.
+    And when flash_attn is importable, SDAR's own flash branch takes every
+    all-ones mask before the SDPA call is reached, so sdpa_nomask would not be
+    what runs either.
+    """
+    if attention_kernel == "sdpa_mask" and not prefix_buffer:
+        return
+    import inspect
+    import sys
+
+    backbone = getattr(model, "model", model)
+    layers = getattr(backbone, "layers", None)
+    if not layers:
+        raise ValueError("attention options need an SDAR checkpoint (.model.layers)")
+    attention = type(layers[0].self_attn)
+    source = inspect.getsource(attention.forward)
+    module = sys.modules[attention.__module__]
+    rebuild = "rebuild models/*-local with harness/scripts/prepare_sdar_local.py --force"
+    if attention_kernel == "sdpa_nomask":
+        if 'kwargs.get("full_attention", False)' not in source:
+            raise RuntimeError(f"attention_kernel=sdpa_nomask, but the modeling code has no full_attention hook; {rebuild}")
+        if "flash_attn_func" in vars(module):
+            raise RuntimeError(
+                "attention_kernel=sdpa_nomask, but flash_attn is importable, so SDAR's flash branch "
+                "would take every all-ones mask instead; uninstall flash_attn"
+            )
+    if prefix_buffer and '"concat_block"' not in source:
+        raise RuntimeError(f"prefix_buffer=True, but the modeling code has no concat_block hook; {rebuild}")
 
 
 class MaskedDiffusionProvider:
@@ -417,6 +468,9 @@ class MaskedDiffusionProvider:
                 )
         self._backbone = getattr(model, "model", None)
         self._lm_head = getattr(model, "lm_head", None)
+        # ModelOptions.attention_kernel / prefix_buffer; from_pretrained sets them.
+        self.attention_kernel = "sdpa_mask"
+        self.prefix_buffer = False
 
     @classmethod
     def from_pretrained(cls, options: ModelOptions) -> "MaskedDiffusionProvider":
@@ -466,6 +520,9 @@ class MaskedDiffusionProvider:
             ),
         )
         provider.layer_split = split
+        check_attention_hooks(model, options.attention_kernel, options.prefix_buffer)
+        provider.attention_kernel = options.attention_kernel
+        provider.prefix_buffer = options.prefix_buffer
         if not provider.verify_lean_path() and options.require_lean_logits:
             raise RuntimeError(
                 "The lean logits path is unavailable, but require_lean_logits is "
@@ -537,6 +594,8 @@ class MaskedDiffusionProvider:
         attention_mask: torch.Tensor,
         position_ids: torch.Tensor,
         cache: Any,
+        *,
+        full_attention: bool = False,
     ) -> None:
         """Write one finished block's K/V into the cache.
 
@@ -544,10 +603,14 @@ class MaskedDiffusionProvider:
         that the K/V of *masked* positions never enters the cache. SDAR's
         reference does exactly this: one extra forward per block, after the
         block is complete. It is real cost and the caller counts it.
+
+        `full_attention=True` says the mask is all True (a single block against
+        its whole prefix), so the patched attention may drop it.
         """
         rows = int(block_ids.shape[0])
         if rows != 1:
             raise ValueError("a block is committed once, at batch 1")
+        extra = {"full_attention": True} if full_attention else {}
         self.model(
             input_ids=block_ids.to(self.device, non_blocking=True),
             attention_mask=attention_mask.unsqueeze(0),
@@ -555,6 +618,7 @@ class MaskedDiffusionProvider:
             past_key_values=cache,
             use_cache=True,
             store_kv=True,
+            **extra,
         )
 
     @torch.inference_mode()

@@ -8,7 +8,7 @@ import sys
 import math
 import statistics
 from collections import Counter
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 # Runnable from any directory: the package lives next to scripts/.
@@ -16,9 +16,118 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from sdar_harness.io import percentile, stream_jsonl, write_json
 
+# Loop-free columns, appended after every older column in this order. A capped
+# task (`maximum_length_termination`: no stop token before the canvas ran out)
+# is usually a repetition loop: it costs minutes, it is the cheapest kind of
+# token for a parallel decoder, and it scores wrong, so it inflates tokens/s
+# and the speedup over fixed:1. These columns leave such tasks out.
+#   per cell: the cell's own capped tasks are dropped;
+#   paired:   each method against the same root and benchmark's fixed:1, on
+#             the tasks both ran less any task capped in either, so the
+#             speedup over fixed:1 compares the same tasks.
+LOOP_FREE_FIELDS = (
+    "n_capped",
+    "loop_free_n",
+    "loop_free_tokens_per_second",
+    "loop_free_seconds_per_task",
+    "loop_free_decode_tokens_per_second",
+    "paired_loop_free_n",
+    "paired_loop_free_tokens_per_second",
+    "paired_loop_free_speedup_vs_fixed1",
+)
+FIXED1 = "fixed_k_1"
+
 
 def mean(values: list[float]) -> float:
     return statistics.fmean(values) if values else float("nan")
+
+
+def capped(row: dict[str, Any]) -> bool:
+    return bool(row["maximum_length_termination"])
+
+
+def corpus_rates(rows: list[dict[str, Any]]) -> dict[str, float | None]:
+    """tokens/s, s/task and decode tokens/s over `rows`.
+
+    The same formulas as summarize_file's all-task `tokens_per_second`,
+    `seconds_per_task` and `decode_tokens_per_second` (corpus sum of tokens over
+    sum of time; the mean task latency; prefill subtracted only when every task
+    recorded it), so on the same rows they give the same numbers.
+    """
+    latencies = [float(row["wall_time_seconds"]) for row in rows]
+    tokens = sum(float(row["output_token_count"]) for row in rows)
+    has_prefill = all(row.get("prefill_seconds") is not None for row in rows)
+    prefill = sum(float(row["prefill_seconds"]) for row in rows) if has_prefill else 0.0
+    return {
+        "tokens_per_second": tokens / sum(latencies) if sum(latencies) > 0 else float("nan"),
+        "seconds_per_task": mean(latencies),
+        "decode_tokens_per_second": (
+            tokens / (sum(latencies) - prefill)
+            if has_prefill and sum(latencies) > prefill else None
+        ),
+    }
+
+
+def loop_free_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """One cell's rates over its tasks that emitted a stop token."""
+    kept = [row for row in rows if not capped(row)]
+    rates = corpus_rates(kept)
+    # Decode tokens/s only where the all-task column exists: every task, the
+    # capped ones included, recorded its prefill.
+    decode = all(row.get("prefill_seconds") is not None for row in rows)
+    return {
+        "n_capped": len(rows) - len(kept),
+        "loop_free_n": len(kept),
+        "loop_free_tokens_per_second": rates["tokens_per_second"],
+        "loop_free_seconds_per_task": rates["seconds_per_task"],
+        "loop_free_decode_tokens_per_second": rates["decode_tokens_per_second"] if decode else None,
+    }
+
+
+def paired_loop_free(cells: list[tuple[str, str, list[dict[str, Any]]]]) -> list[dict[str, Any]]:
+    """Paired loop-free columns for each (benchmark, method, records) cell.
+
+    Each cell is paired with its benchmark's fixed:1 cell: P is the tasks both
+    ran, less any task capped in either (for fixed:1 itself, its own uncapped
+    tasks). The cell's tokens/s on P and its ratio to fixed:1's tokens/s on the
+    same P. All three are None when the benchmark has no (or more than one)
+    fixed:1 cell. Returned in the order of `cells`.
+    """
+    blank = {
+        "paired_loop_free_n": None,
+        "paired_loop_free_tokens_per_second": None,
+        "paired_loop_free_speedup_vs_fixed1": None,
+    }
+    fixed1: dict[str, list[int]] = {}
+    for index, (benchmark, method, _) in enumerate(cells):
+        if method == FIXED1:
+            fixed1.setdefault(benchmark, []).append(index)
+    reference_rows = {
+        benchmark: cells[indices[0]][2]
+        for benchmark, indices in fixed1.items() if len(indices) == 1
+    }
+    out: list[dict[str, Any]] = []
+    for benchmark, _, rows in cells:
+        reference = reference_rows.get(benchmark)
+        if reference is None:
+            out.append(dict(blank))
+            continue
+        ids = {str(row["example_id"]) for row in rows}
+        reference_ids = {str(row["example_id"]) for row in reference}
+        excluded = {str(row["example_id"]) for row in rows + reference if capped(row)}
+        keep = (ids & reference_ids) - excluded
+        rate = corpus_rates([row for row in rows if str(row["example_id"]) in keep])
+        reference_rate = corpus_rates(
+            [row for row in reference if str(row["example_id"]) in keep]
+        )["tokens_per_second"]
+        out.append({
+            "paired_loop_free_n": len(keep),
+            "paired_loop_free_tokens_per_second": rate["tokens_per_second"],
+            "paired_loop_free_speedup_vs_fixed1": (
+                rate["tokens_per_second"] / reference_rate if reference_rate > 0 else float("nan")
+            ),
+        })
+    return out
 
 
 def stage_breakdown(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -237,6 +346,12 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument(
+        "--recorded-output-root",
+        help="write records_path as if --output-root were this path: for a run "
+        "copied from the host that made it (EC2), so a regenerated summary keeps "
+        "the records_path it was first written with",
+    )
     args = parser.parse_args()
     paths = []
     for records in args.output_root.rglob("records.jsonl"):
@@ -244,15 +359,30 @@ def main() -> None:
         paths.append(scored if scored.exists() else records)
     if not paths:
         parser.error(f"No method records found below {args.output_root}")
-    summaries = [summarize_file(path) for path in sorted(paths)]
+    summaries = []
+    cells = []
+    for path in sorted(paths):
+        summary = summarize_file(path)
+        if args.recorded_output_root:
+            relative = path.resolve().relative_to(args.output_root.resolve())
+            summary["records_path"] = str(PurePosixPath(args.recorded_output_root) / relative)
+        rows = list(stream_jsonl(path))
+        summary.update(loop_free_summary(rows))
+        summaries.append(summary)
+        cells.append((summary["benchmark"], summary["method"], rows))
+    for summary, paired in zip(summaries, paired_loop_free(cells)):
+        summary.update(paired)
     summaries.sort(key=lambda row: (row["benchmark"], row["method"]))
     args.output_dir.mkdir(parents=True, exist_ok=True)
     write_json(args.output_dir / "summary.json", summaries)
+    # The loop-free columns go after every older column, so a summary made
+    # before they existed is a prefix of one made now.
     all_fields: list[str] = []
     for row in summaries:
         for field in row:
-            if field not in all_fields:
+            if field not in all_fields and field not in LOOP_FREE_FIELDS:
                 all_fields.append(field)
+    all_fields.extend(LOOP_FREE_FIELDS)
     flat_rows = []
     for row in summaries:
         flat = dict(row)

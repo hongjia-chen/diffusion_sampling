@@ -50,7 +50,15 @@ BENCHMARKS="${BENCHMARKS:-gsm8k math_500 humaneval mbpp_sanitized}"
 DATA_ROOT="${DATA_ROOT:-$PROJECT_DIR/../data}"
 SDAR_OVERLAY="${SDAR_OVERLAY:-$HARNESS_DIR/vendor_env/tf452}"
 EVALPLUS_WORKERS="${EVALPLUS_WORKERS:-4}"
-MICROBATCH=4
+# Verifier rows per call for adaptive:δ (self-verification); unused by fixed/dynamic.
+MICROBATCH="${MICROBATCH:-4}"
+# Opt-in attention options (ModelOptions; need the patched local model):
+# ATTENTION_KERNEL=sdpa_nomask drops the all-True mask of block-local forwards
+# so SDPA can use its flash kernel; PREFIX_BUFFER=1 copies the cached prefix
+# into a per-block buffer once instead of every step (bit-identical).
+ATTENTION_KERNEL="${ATTENTION_KERNEL:-sdpa_mask}"
+ATTENTION_ARGS=(--attention-kernel "$ATTENTION_KERNEL")
+[ "${PREFIX_BUFFER:-0}" = "1" ] && ATTENTION_ARGS+=(--prefix-buffer)
 # SDAR's eval config: fp16 weights, logits over the whole vocabulary (151936
 # = the lm_head width, so the limit is a no-op; only the mask token is barred).
 DTYPE="${DTYPE:-float16}"
@@ -153,7 +161,7 @@ MI_decoding SDAR baselines: $MODEL_NAME (trained block $BLOCK, decoded at $BLOCK
 started: $(date '+%Y-%m-%d %H:%M:%S %Z')   host: $(hostname)   cards: $CARDS
 methods: ${METHOD_LIST[*]}
 benchmarks: $BENCHMARKS (canvas $(for b in $BENCHMARKS; do printf '%s=%s ' "$b" "$(canvas_for "$b")"; done))
-tasks: $TASKS per benchmark   seed: $SEED   block: $BLOCK   vocab_limit: $VOCAB_LIMIT   warmups: 3
+tasks: $TASKS per benchmark   seed: $SEED   block: $BLOCK   vocab_limit: $VOCAB_LIMIT   warmups: 3   attention: $ATTENTION_KERNEL   prefix buffer: ${PREFIX_BUFFER:-0}   verifier rows: $MICROBATCH
 recipe: OpenCompass (SDAR eval config) prompts and graders, $DTYPE, greedy T=0, logp confidence, max_candidates=$BLOCK, early stop on
 data: $(dirname -- "$(data_for gsm8k)")
 output: $OUTPUT_ROOT
@@ -177,8 +185,9 @@ for bench in $BENCH_TO_RUN; do
         --continuation-length "$(canvas_for "$bench")" \
         --verifier-microbatch-size "$MICROBATCH" \
         --model "$MODEL" --family sdar --block-length "$BLOCK" "${DEVICE_ARGS[@]}" \
-        --dtype "$DTYPE" --seed "$SEED" \
-        --timing-repeats 1 --warmup-runs 3 --trace-limit 0 --require-lean-logits \
+        --dtype "$DTYPE" --seed "$SEED" "${ATTENTION_ARGS[@]}" \
+        --timing-repeats 1 --warmup-runs 3 --trace-limit "${TRACE_LIMIT:-0}" --require-lean-logits \
+        --profile-stages "${PROFILE_STAGES:-0}" \
         --max-candidates "$BLOCK" "${SAMPLE_ARGS[@]}" --local-files-only \
         --vocab-limit "$VOCAB_LIMIT" \
         --fixed-temperature 0.0 --fixed-confidence logp \
